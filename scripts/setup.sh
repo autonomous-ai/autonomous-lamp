@@ -84,6 +84,16 @@ stage_prerequisites() {
     avahi-daemon avahi-utils libnss-mdns || true
   systemctl stop hostapd dnsmasq nginx 2>/dev/null || true
   systemctl unmask hostapd dnsmasq 2>/dev/null || true
+  # On "dirty" devices (previously configured with custom networking, e.g. intern
+  # devices), dhcpcd may be installed but has no systemd service unit. apt install
+  # kills any manually-started dhcpcd process and nothing restarts it. Enable
+  # dhcpcd as a proper service now so it survives the package install churn.
+  if ! systemctl is-enabled --quiet dhcpcd 2>/dev/null; then
+    echo "[stage] dhcpcd not a managed service — enabling for dirty-device compat"
+    systemctl enable dhcpcd 2>/dev/null || true
+    systemctl start dhcpcd 2>/dev/null || true
+    sleep 5
+  fi
   # Some base images (Armbian / older RPi OS images that once ran NetworkManager
   # or systemd-resolved) ship /etc/resolv.conf as a regular file with no
   # nameserver lines, so dhcpcd's lease never reaches the glibc resolver. Only
@@ -107,6 +117,31 @@ stage_prerequisites() {
     echo 'name_servers="1.1.1.1 8.8.8.8"' > /etc/resolvconf.conf
   fi
   resolvconf -u 2>/dev/null || true
+  # apt install may restart or reconfigure wpa_supplicant, dropping the STA WiFi
+  # connection mid-setup. Restore the association and DHCP lease before continuing
+  # so later stages (OTA metadata fetch, Node.js install) can reach the internet.
+  echo "[stage] Restoring STA WiFi if lost after package install..."
+  systemctl unmask wpa_supplicant@wlan0 2>/dev/null || true
+  if ! systemctl is-active --quiet wpa_supplicant@wlan0; then
+    systemctl restart wpa_supplicant@wlan0 2>/dev/null || true
+  fi
+  # Wait for actual WiFi association (not just service active) before DHCP
+  for _i in $(seq 1 20); do
+    iw dev wlan0 link 2>/dev/null | grep -q "Connected to" && break
+    sleep 2
+  done
+  if ! ip route show | grep -q "^default"; then
+    echo "[stage] No default route — requesting DHCP lease..."
+    systemctl restart dhcpcd 2>/dev/null || /sbin/dhcpcd wlan0 2>/dev/null || true
+    sleep 8
+  fi
+  # Remove stale AP mode route if still present — conflicts with STA routing
+  ip route del 192.168.100.0/24 dev wlan0 2>/dev/null || true
+  # Prepend 8.8.8.8 as public DNS fallback — DHCP-provided DNS may be an
+  # internal router IP that becomes unreachable after wpa_supplicant restarts.
+  grep -q "nameserver 8.8.8.8" /etc/resolv.conf 2>/dev/null || \
+    sed -i '1s/^/nameserver 8.8.8.8\n/' /etc/resolv.conf 2>/dev/null || \
+    echo "nameserver 8.8.8.8" > /etc/resolv.conf
   # Node.js 22 for OpenClaw CLI
   if ! command -v node &>/dev/null || ! node -v 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])'; then
     echo "[stage] Install Node.js 22 (NodeSource)"
@@ -503,7 +538,26 @@ EOF
 stage_openclaw() {
   echo "[stage] Install OpenClaw"
   OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.5.27}"
+  # Force-remove old install to avoid ENOTEMPTY — npm uninstall fails when a
+  # previous install was killed mid-run (partial state left in node_modules).
+  NPM_PREFIX="$(npm prefix -g)"
+  rm -rf "${NPM_PREFIX}/lib/node_modules/openclaw" 2>/dev/null || true
+  rm -f "${NPM_PREFIX}/bin/openclaw" 2>/dev/null || true
+  npm cache clean --force 2>/dev/null || true
   retry "npm install -g openclaw@${OPENCLAW_VERSION}" 5
+  # npm sometimes installs the package but skips the bin symlink (race condition
+  # with a previously-killed install). Repair it explicitly if missing.
+  NPM_BIN_DIR="$(npm prefix -g)/bin"
+  if [ ! -f "$NPM_BIN_DIR/openclaw" ] && [ ! -L "$NPM_BIN_DIR/openclaw" ]; then
+    NPM_LIB="$(npm prefix -g)/lib/node_modules/openclaw"
+    OPENCLAW_JS=$(node -e "try{console.log(require('$NPM_LIB/package.json').bin.openclaw)}catch(e){}" 2>/dev/null || true)
+    if [ -n "$OPENCLAW_JS" ]; then
+      echo "[stage] Repairing missing openclaw bin symlink → $NPM_BIN_DIR/openclaw"
+      ln -sf "$NPM_LIB/$OPENCLAW_JS" "$NPM_BIN_DIR/openclaw"
+      chmod +x "$NPM_BIN_DIR/openclaw"
+    fi
+  fi
+  export PATH="$NPM_BIN_DIR:$PATH"
   openclaw --version || true
 
   # OpenClaw state root for root-run service (under root's home).
@@ -573,9 +627,9 @@ EOF
 
   CHROME_PATH=$(command -v chromium 2>/dev/null || command -v chromium-browser 2>/dev/null || true)
   : "${CHROME_PATH:=/usr/bin/chromium}"
-  OPENCLAW_BIN=$(command -v openclaw)
-  if [ -z "$OPENCLAW_BIN" ]; then
-    echo "ERROR: openclaw binary not found after npm install"
+  OPENCLAW_BIN=$(command -v openclaw 2>/dev/null || echo "$NPM_BIN_DIR/openclaw")
+  if [ ! -f "$OPENCLAW_BIN" ] && [ ! -L "$OPENCLAW_BIN" ]; then
+    echo "ERROR: openclaw binary not found after npm install (checked $OPENCLAW_BIN)"
     exit 1
   fi
   cat >/etc/systemd/system/openclaw.service <<EOF
@@ -1009,7 +1063,6 @@ sleep 1
 
 # switch to AP mode
 iw dev wlan0 set type __ap
-iw dev wlan0 set channel 6
 sleep 1
 
 # Bring interface up
@@ -1025,9 +1078,19 @@ ip addr add 192.168.100.1/24 dev wlan0
 # can no longer reach it. Best-effort: resolvconf may not be installed.
 command -v resolvconf >/dev/null 2>&1 && resolvconf -d wlan0.dhcp 2>/dev/null || true
 
-# Enable AP services
+# Restore captive-portal DNS wildcard — device-sta-mode strips this line so
+# DNS resolves correctly in STA mode; re-add it here so setup page redirects
+# work when switching back to AP mode.
+grep -q '^address=/#/' /etc/dnsmasq.d/99-lamp.conf 2>/dev/null || \
+  echo 'address=/#/192.168.100.1' >> /etc/dnsmasq.d/99-lamp.conf
+
+# Enable AP services — start nginx+dnsmasq first so web UI is ready before
+# the SSID becomes visible, preventing a 404 on first connect.
 systemctl unmask hostapd dnsmasq 2>/dev/null || true
 systemctl enable hostapd dnsmasq
+
+systemctl restart nginx 2>/dev/null || true
+systemctl restart dnsmasq
 
 systemctl restart hostapd
 sleep 2
@@ -1069,18 +1132,6 @@ if ! systemctl is-active --quiet hostapd; then
 
   exit 1
 fi
-
-# Restore captive-portal DNS wildcard — device-sta-mode strips this line so
-# DNS resolves correctly in STA mode; re-add it here so setup page redirects
-# work when switching back to AP mode.
-grep -q '^address=/#/' /etc/dnsmasq.d/99-lamp.conf 2>/dev/null || \
-  echo 'address=/#/192.168.100.1' >> /etc/dnsmasq.d/99-lamp.conf
-
-# Restart DHCP server
-systemctl restart dnsmasq
-
-# Restart web service if using captive portal
-systemctl restart nginx 2>/dev/null || true
 
 echo "AP MODE ENABLED"
 EOF
@@ -1130,6 +1181,15 @@ sed -i '/nohook wpa_supplicant/d' /etc/dhcpcd.conf
 # Remove AP captive-portal DNS wildcard — redirects ALL queries to 192.168.100.1
 # which breaks LLM/internet connectivity when switching to STA mode.
 sed -i '/^address=\/#\//d' /etc/dnsmasq.d/99-lamp.conf 2>/dev/null || true
+
+# Flush dnsmasq's 127.0.0.1 from resolv.conf — when dnsmasq ran in AP mode it
+# registered itself as the DNS resolver. Stopping dnsmasq doesn't clean this up,
+# so hostname resolution stays broken until dhcpcd gets a new lease. Clear it
+# now and seed 8.8.8.8 so npm/curl work immediately after STA switch.
+command -v resolvconf >/dev/null 2>&1 && resolvconf -d lo.dnsmasq 2>/dev/null || true
+grep -q "nameserver 8.8.8.8" /etc/resolv.conf 2>/dev/null || \
+  sed -i '1s/^/nameserver 8.8.8.8\n/' /etc/resolv.conf 2>/dev/null || \
+  echo "nameserver 8.8.8.8" > /etc/resolv.conf
 
 # Enable STA services
 systemctl unmask wpa_supplicant@wlan0 2>/dev/null || true
