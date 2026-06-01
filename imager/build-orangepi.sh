@@ -464,14 +464,17 @@ iw reg set "\$REG" 2>/dev/null || true
 
 ip link set wlan0 down; sleep 1
 iw dev wlan0 set type __ap
-iw dev wlan0 set channel 6
 sleep 1
 ip link set wlan0 up; sleep 1
 ip addr flush dev wlan0
 ip addr add 192.168.100.1/24 dev wlan0
 
+# Start nginx+dnsmasq first so web UI is ready before the SSID becomes
+# visible, preventing a 404 on first connect.
 systemctl unmask hostapd dnsmasq 2>/dev/null || true
 systemctl enable hostapd dnsmasq
+systemctl restart nginx 2>/dev/null || true
+systemctl restart dnsmasq
 systemctl restart hostapd; sleep 2
 if ! systemctl is-active --quiet hostapd; then
   echo "hostapd failed. Retrying..."
@@ -482,8 +485,6 @@ if ! systemctl is-active --quiet hostapd; then
   journalctl -u hostapd -n 50 --no-pager || true
   exit 1
 fi
-systemctl restart dnsmasq
-systemctl restart nginx 2>/dev/null || true
 echo "AP MODE ENABLED  SSID=\$AP_SSID  IP=192.168.100.1"
 EOFSCRIPT
 chmod +x /usr/local/bin/device-ap-mode

@@ -184,9 +184,13 @@ sleep 1
 ip addr flush dev wlan0
 ip addr add 192.168.100.1/24 dev wlan0
 
-# Enable AP services
+# Enable AP services — start nginx+dnsmasq first so web UI is ready before
+# the SSID becomes visible, preventing a 404 on first connect.
 systemctl unmask hostapd dnsmasq 2>/dev/null || true
 systemctl enable hostapd dnsmasq
+
+systemctl restart nginx 2>/dev/null || true
+systemctl restart dnsmasq
 
 systemctl restart hostapd
 sleep 2
@@ -228,12 +232,6 @@ if ! systemctl is-active --quiet hostapd; then
 
   exit 1
 fi
-
-# Restart DHCP server
-systemctl restart dnsmasq
-
-# Restart web service if using captive portal
-systemctl restart nginx 2>/dev/null || true
 
 echo "AP MODE ENABLED"
 EOF
