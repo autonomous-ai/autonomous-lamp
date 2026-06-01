@@ -184,6 +184,17 @@ sleep 1
 ip addr flush dev wlan0
 ip addr add 192.168.100.1/24 dev wlan0
 
+# Clear stale DHCP nameserver from previous STA session — otherwise
+# /etc/resolv.conf keeps pointing at the home router's DNS even though wlan0
+# can no longer reach it. Best-effort: resolvconf may not be installed.
+command -v resolvconf >/dev/null 2>&1 && resolvconf -d wlan0.dhcp 2>/dev/null || true
+
+# Restore captive-portal DNS wildcard — device-sta-mode strips this line so
+# DNS resolves correctly in STA mode; re-add it here so setup page redirects
+# work when switching back to AP mode.
+grep -q '^address=/#/' /etc/dnsmasq.d/99-lamp.conf 2>/dev/null || \
+  echo 'address=/#/192.168.100.1' >> /etc/dnsmasq.d/99-lamp.conf
+
 # Enable AP services — start nginx+dnsmasq first so web UI is ready before
 # the SSID becomes visible, preventing a 404 on first connect.
 systemctl unmask hostapd dnsmasq 2>/dev/null || true
