@@ -281,7 +281,12 @@ class FireHazardPerception(Perception[cv2t.MatLike]):
         self._last_sent_by_type: dict[str, float] = {}
         self._dedup_window_s: float = config.FIRE_HAZARD_DEDUP_WINDOW_S
 
-        # Buffer — accumulates hazards + annotated snapshots across ticks
+        # Confirmation: track when each hazard type was first seen continuously.
+        # Only promote to buffer after it persists for FIRE_HAZARD_CONFIRM_S.
+        self._first_seen_by_type: dict[str, float] = {}
+        self._confirm_s: float = config.FIRE_HAZARD_CONFIRM_S
+
+        # Buffer — accumulates confirmed hazards + annotated snapshots across ticks
         self._hazard_buffer: list[FireHazard] = []
         self._snapshot_buffer: list[npt.NDArray[np.uint8]] = []
         self._flush_interval: float = config.FIRE_HAZARD_FLUSH_S
@@ -296,14 +301,39 @@ class FireHazardPerception(Perception[cv2t.MatLike]):
         now = time.time()
 
         # Detect on interval
-        if now - self._last_check_ts >= config.FIRE_HAZARD_CHECK_INTERVAL_S:
-            self._last_check_ts = now
-            hazards = self._detector.detect(data)
-            if hazards:
-                annotated = self._annotate_frame(data, hazards)
-                with self._state_lock:
-                    self._hazard_buffer.extend(hazards)
-                    self._snapshot_buffer.append(annotated)
+        if now - self._last_check_ts < config.FIRE_HAZARD_CHECK_INTERVAL_S:
+            self._flush_buffer(now)
+            return
+        self._last_check_ts = now
+
+        hazards = self._detector.detect(data)
+
+        with self._state_lock:
+            seen_types: set[str] = set()
+            confirmed: list[FireHazard] = []
+
+            for h in hazards:
+                t = h.type.value
+                seen_types.add(t)
+
+                if t not in self._first_seen_by_type:
+                    self._first_seen_by_type[t] = now
+                    logger.debug("[fire_hazard] first seen: %s", t)
+
+                elapsed = now - self._first_seen_by_type[t]
+                if elapsed >= self._confirm_s:
+                    confirmed.append(h)
+
+            # Clear first-seen for types no longer detected (streak broken)
+            for t in list(self._first_seen_by_type):
+                if t not in seen_types:
+                    logger.debug("[fire_hazard] streak broken: %s", t)
+                    del self._first_seen_by_type[t]
+
+            if confirmed:
+                annotated = self._annotate_frame(data, confirmed)
+                self._hazard_buffer.extend(confirmed)
+                self._snapshot_buffer.append(annotated)
 
         # Flush on interval
         self._flush_buffer(now)
@@ -355,8 +385,9 @@ class FireHazardPerception(Perception[cv2t.MatLike]):
         self._send_event("fire_hazard.detected", message, "fire_hazard", snapshots, None)
 
     _HAZARD_COLORS: dict[FireHazardEnum, tuple[int, int, int]] = {
-        FireHazardEnum.FIRE: (0, 0, 255),              # red
-        FireHazardEnum.FIRE_ON_FURNITURE: (0, 0, 200),  # dark red
+        FireHazardEnum.HAZARD_FIRE: (0, 0, 255),       # red
+        FireHazardEnum.UNSURE_FIRE: (0, 165, 255),     # orange
+        FireHazardEnum.SAFE_FIRE: (0, 200, 0),         # green
         FireHazardEnum.SMOKE: (128, 128, 128),          # gray
     }
 
