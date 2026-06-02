@@ -1,0 +1,34 @@
+sofa
+couch
+armchair
+recliner
+cushion
+pillow
+mattress
+bedding
+blanket
+comforter
+duvet
+quilt
+curtain
+drape
+rug
+carpet
+tapestry
+tablecloth
+towel
+wooden chair
+wooden table
+wooden shelf
+wooden cabinet
+bookshelf
+cardboard box
+newspaper
+magazine
+paper stack
+candle
+lamp shade
+upholstered chair
+ottoman
+futon
+bean bag

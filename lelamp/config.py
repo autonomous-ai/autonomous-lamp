@@ -167,6 +167,16 @@ EMOTION_SNAPSHOT_DIR = os.environ.get(
 )
 EMOTION_SNAPSHOT_MAX_COUNT = int(os.environ.get("LELAMP_EMOTION_SNAPSHOT_MAX_COUNT", "100"))
 
+# --- Sensing: Fire hazard detection (object detection via dlbackend) ---
+FIRE_HAZARD_ENABLED = os.environ.get("LELAMP_FIRE_HAZARD_ENABLED", "false").lower() == "true"
+FIRE_HAZARD_CHECK_INTERVAL_S = float(os.environ.get("LELAMP_FIRE_HAZARD_CHECK_INTERVAL_S", "10.0"))
+FIRE_HAZARD_CONFIDENCE_THRESHOLD = float(os.environ.get("LELAMP_FIRE_HAZARD_CONFIDENCE_THRESHOLD", "0.3"))
+FIRE_HAZARD_OVERLAP_THRESHOLD = float(os.environ.get("LELAMP_FIRE_HAZARD_OVERLAP_THRESHOLD", "0.2"))
+FIRE_HAZARD_DEDUP_WINDOW_S = float(os.environ.get("LELAMP_FIRE_HAZARD_DEDUP_WINDOW_S", "60.0"))
+FIRE_HAZARD_FLUSH_S = float(os.environ.get("LELAMP_FIRE_HAZARD_FLUSH_S", "10.0"))
+FIRE_HAZARD_DETECTOR = os.environ.get("LELAMP_FIRE_HAZARD_DETECTOR", "owlv2")
+FIRE_HAZARD_API_TIMEOUT_S = float(os.environ.get("LELAMP_FIRE_HAZARD_API_TIMEOUT_S", "15.0"))
+
 # --- Sensing: Pose-based motion detection (RTMPose ONNX) ---
 POSE_MOTION_ENABLED = (
     os.environ.get("LELAMP_POSE_MOTION_ENABLED", "true").lower() == "true"
