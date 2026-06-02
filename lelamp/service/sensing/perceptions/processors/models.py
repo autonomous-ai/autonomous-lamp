@@ -9,9 +9,9 @@ import numpy.typing as npt
 
 class FireHazardEnum(StrEnum):
     SMOKE = "smoke"
-    FIRE = "fire"
-    FIRE_ON_FURNITURE = "fire_on_furniture"
-    SAFE = "safe"
+    HAZARD_FIRE = "hazard_fire"
+    SAFE_FIRE = "safe_fire"
+    UNSURE_FIRE = "unsure_fire"
 
 
 @dataclass

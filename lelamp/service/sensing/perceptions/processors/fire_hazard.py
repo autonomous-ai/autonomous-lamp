@@ -44,20 +44,15 @@ class RemoteFireHazardDetector:
     DEFAULT_FIRE_CLASSES_PATH: Path = RESOURCES_DIR / "fire_classes.txt"
     DEFAULT_SMOKE_CLASSES_PATH: Path = RESOURCES_DIR / "smoke_classes.txt"
     DEFAULT_FLAMMABLE_CLASSES_PATH: Path = RESOURCES_DIR / "flammable_classes.txt"
-
+    DEFAULT_SAFE_CLASSES_PATH: Path = RESOURCES_DIR / "safe_classes.txt"
 
     def __init__(
         self,
-        base_url: str,
-        api_key: str,
-        detector_name: str = config.FIRE_HAZARD_DETECTOR,
+        base_url: str = config.FIRE_HAZARD_BACKEND_URL,
+        api_key: str = config.DL_API_KEY,
         timeout: float = config.FIRE_HAZARD_API_TIMEOUT_S,
     ):
-        self._url: str = (
-            base_url.rstrip("/") + "/api/dl/object-detect/" + detector_name
-            if base_url
-            else ""
-        )
+        self._url: str = base_url
         self._api_key: str = api_key
         self._timeout: float = timeout
         self._crypto: CryptoSession | None = None
@@ -65,18 +60,23 @@ class RemoteFireHazardDetector:
         self._fire_classes: list[str] = self._load_classes(self.DEFAULT_FIRE_CLASSES_PATH)
         self._smoke_classes: list[str] = self._load_classes(self.DEFAULT_SMOKE_CLASSES_PATH)
         self._flammable_classes: list[str] = self._load_classes(self.DEFAULT_FLAMMABLE_CLASSES_PATH)
-        self._all_classes: list[str] = self._fire_classes + self._smoke_classes + self._flammable_classes
+        self._safe_classes: list[str] = self._load_classes(self.DEFAULT_SAFE_CLASSES_PATH)
+        self._all_classes: list[str] = (
+            self._fire_classes + self._smoke_classes + self._flammable_classes + self._safe_classes
+        )
 
         self._fire_set: frozenset[str] = frozenset(self._fire_classes)
         self._smoke_set: frozenset[str] = frozenset(self._smoke_classes)
         self._flammable_set: frozenset[str] = frozenset(self._flammable_classes)
+        self._safe_set: frozenset[str] = frozenset(self._safe_classes)
 
         if config.DL_ENCRYPTION_ENABLED:
             self._setup_crypto()
 
         logger.info(
-            "[fire_hazard] detector initialized — %d fire, %d smoke, %d flammable classes, endpoint=%s",
-            len(self._fire_classes), len(self._smoke_classes), len(self._flammable_classes), self._url,
+            "[fire_hazard] detector initialized — %d fire, %d smoke, %d flammable, %d safe classes, endpoint=%s",
+            len(self._fire_classes), len(self._smoke_classes),
+            len(self._flammable_classes), len(self._safe_classes), self._url,
         )
 
     @staticmethod
@@ -119,13 +119,14 @@ class RemoteFireHazardDetector:
         fire_objects = [o for o in objects if o.get("class_name", "") in self._fire_set]
         smoke_objects = [o for o in objects if o.get("class_name", "") in self._smoke_set]
         flammable_objects = [o for o in objects if o.get("class_name", "") in self._flammable_set]
+        safe_objects = [o for o in objects if o.get("class_name", "") in self._safe_set]
 
         logger.debug(
-            "[fire_hazard] detections: %d fire, %d smoke, %d flammable",
-            len(fire_objects), len(smoke_objects), len(flammable_objects),
+            "[fire_hazard] detections: %d fire, %d smoke, %d flammable, %d safe",
+            len(fire_objects), len(smoke_objects), len(flammable_objects), len(safe_objects),
         )
 
-        return self._assess_hazard(fire_objects, smoke_objects, flammable_objects)
+        return self._assess_hazard(fire_objects, smoke_objects, flammable_objects, safe_objects)
 
     def _call_api(self, frame: cv2t.MatLike) -> list[dict[str, Any]]:
         """POST frame to the object detection endpoint."""
@@ -179,12 +180,14 @@ class RemoteFireHazardDetector:
         fire_objects: list[dict[str, Any]],
         smoke_objects: list[dict[str, Any]],
         flammable_objects: list[dict[str, Any]],
+        safe_objects: list[dict[str, Any]],
     ) -> list[FireHazard]:
         """Assess fire hazard risk from detected objects.
 
-        - Smoke → SMOKE hazard
-        - Fire with no flammable overlap → FIRE hazard
-        - Fire overlapping a flammable (IoR > threshold) → FIRE_ON_FURNITURE hazard
+        - Smoke → SMOKE
+        - Fire near flammable (higher overlap than safe) → HAZARD_FIRE
+        - Fire near safe object (higher overlap than flammable) → SAFE_FIRE
+        - Fire with no significant overlap to either → UNSURE_FIRE
         """
         hazards: list[FireHazard] = []
 
@@ -202,30 +205,58 @@ class RemoteFireHazardDetector:
             [xywh_to_xyxy(np.array(o["xywh"], dtype=np.float32)) for o in flammable_objects]
         ) if flammable_objects else np.zeros((0, 4), dtype=np.float32)
 
+        safe_bboxes = np.array(
+            [xywh_to_xyxy(np.array(o["xywh"], dtype=np.float32)) for o in safe_objects]
+        ) if safe_objects else np.zeros((0, 4), dtype=np.float32)
+
         # Filter degenerate boxes
         if len(fire_bboxes) > 0:
             fire_bboxes = fire_bboxes[bbox_area(fire_bboxes) > 1e-5]
         if len(flammable_bboxes) > 0:
             flammable_bboxes = flammable_bboxes[bbox_area(flammable_bboxes) > 1e-5]
+        if len(safe_bboxes) > 0:
+            safe_bboxes = safe_bboxes[bbox_area(safe_bboxes) > 1e-5]
 
         n_fire = fire_bboxes.shape[0]
         n_flammable = flammable_bboxes.shape[0]
+        n_safe = safe_bboxes.shape[0]
 
-        if n_fire > 0 and n_flammable > 0:
-            # Broadcast: (N_fire, 1, 4) vs (1, N_flammable, 4) → (N_fire, N_flammable)
-            overlap = bbox_intersection(
+        if n_fire == 0:
+            return hazards
+
+        # Compute flammable overlap: intersection / min(area_fire, area_flammable)
+        if n_flammable > 0:
+            flammable_overlap = bbox_intersection(
                 fire_bboxes[:, None, :], flammable_bboxes[None, :, :]
-            ) / bbox_area(fire_bboxes[:, None, :])
-            max_overlap = overlap.max(axis=-1)
+            ) / np.minimum(
+                bbox_area(fire_bboxes[:, None, :]), bbox_area(flammable_bboxes[None, :, :])
+            )
+            flammable_score = flammable_overlap.max(axis=-1)  # (N_fire,)
+        else:
+            flammable_score = np.full(n_fire, -1.0)
 
-            for score, bbox in zip(max_overlap, fire_bboxes):
-                if score > config.FIRE_HAZARD_OVERLAP_THRESHOLD:
-                    hazards.append(FireHazard(type=FireHazardEnum.FIRE_ON_FURNITURE, bbox=bbox))
-                else:
-                    hazards.append(FireHazard(type=FireHazardEnum.FIRE, bbox=bbox))
-        elif n_fire > 0:
-            for bbox in fire_bboxes:
-                hazards.append(FireHazard(type=FireHazardEnum.FIRE, bbox=bbox))
+        # Compute safe overlap: intersection / min(area_fire, area_safe)
+        if n_safe > 0:
+            safe_overlap = bbox_intersection(
+                fire_bboxes[:, None, :], safe_bboxes[None, :, :]
+            ) / np.minimum(
+                bbox_area(fire_bboxes[:, None, :]), bbox_area(safe_bboxes[None, :, :])
+            )
+            safe_score = safe_overlap.max(axis=-1)  # (N_fire,)
+        else:
+            safe_score = np.full(n_fire, -1.0)
+
+        threshold = config.FIRE_HAZARD_OVERLAP_THRESHOLD
+        is_safe = np.logical_and(safe_score > flammable_score, safe_score > threshold)
+        is_hazard = np.logical_and(flammable_score >= safe_score, flammable_score > threshold)
+
+        for safe, hazard, bbox in zip(is_safe, is_hazard, fire_bboxes):
+            if safe:
+                hazards.append(FireHazard(type=FireHazardEnum.SAFE_FIRE, bbox=bbox))
+            elif hazard:
+                hazards.append(FireHazard(type=FireHazardEnum.HAZARD_FIRE, bbox=bbox))
+            else:
+                hazards.append(FireHazard(type=FireHazardEnum.UNSURE_FIRE, bbox=bbox))
 
         return hazards
 
@@ -238,12 +269,12 @@ class FireHazardPerception(Perception[cv2t.MatLike]):
         perception_state: PerceptionStateObservers,
         send_event: SendEventCallable,
         presense_service: PresenseService | None = None,
-        base_url: str = config.DL_BACKEND_URL,
+        base_url: str = config.FIRE_HAZARD_BACKEND_URL,
         api_key: str = config.DL_API_KEY,
     ):
         super().__init__(perception_state, send_event)
         self._presense_service = presense_service
-        self._detector = RemoteFireHazardDetector(base_url, api_key)
+        self._detector = RemoteFireHazardDetector(base_url=base_url, api_key=api_key)
         self._last_check_ts: float = 0.0
 
         self._state_lock: threading.RLock = threading.RLock()
