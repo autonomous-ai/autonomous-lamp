@@ -1,15 +1,14 @@
-fire pit
-fireplace
-fire bowl
-campfire
-torch
-candle
-gas stove
-barbecue grill
-fire ring
-chiminea
-oil lamp
-lantern
-incense burner
-fire dancer
-bonfire
+a single fire pit
+a single fireplace
+a single fire bowl
+a single campfire
+a single torch
+a single candle
+a single gas stove
+a single barbecue grill
+a single fire ring
+a single chiminea
+a single oil lamp
+a single lantern
+a single incense burner
+a single bonfire
