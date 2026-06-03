@@ -17,6 +17,7 @@ import secrets
 import signal
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Security
@@ -202,7 +203,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _setup_logging(log_dir: str | None) -> dict | None:
+def _setup_logging(log_dir: str | None) -> dict[str, Any] | None:
     """Configure application logging. Returns uvicorn log_config dict (or None for console)."""
     if not log_dir:
         logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)

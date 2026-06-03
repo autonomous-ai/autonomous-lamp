@@ -18,6 +18,7 @@ import os
 import signal
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import httpx
 import uvicorn
@@ -189,7 +190,7 @@ async def proxy_ws(client_ws: WebSocket, path: str) -> None:
             return
 
     try:
-        async with websockets.connect(ws_url, additional_headers=extra_headers) as backend_ws:
+        async with websockets.connect(ws_url, additional_headers=extra_headers, open_timeout=60) as backend_ws:
             # Forward the first message if it wasn't a key exchange
             if first_msg is not None:
                 await backend_ws.send(first_msg)
@@ -282,7 +283,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _setup_logging(log_dir: str | None) -> dict | None:
+def _setup_logging(log_dir: str | None) -> dict[str, Any] | None:
     """Configure application logging. Returns uvicorn log_config dict (or None for console)."""
     if not log_dir:
         logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
