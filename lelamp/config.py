@@ -169,7 +169,7 @@ EMOTION_SNAPSHOT_MAX_COUNT = int(os.environ.get("LELAMP_EMOTION_SNAPSHOT_MAX_COU
 
 # --- Sensing: Fire hazard detection (object detection via dlbackend) ---
 FIRE_HAZARD_ENABLED = os.environ.get("LELAMP_FIRE_HAZARD_ENABLED", "false").lower() == "true"
-FIRE_HAZARD_CHECK_INTERVAL_S = float(os.environ.get("LELAMP_FIRE_HAZARD_CHECK_INTERVAL_S", "10.0"))
+FIRE_HAZARD_CHECK_INTERVAL_S = float(os.environ.get("LELAMP_FIRE_HAZARD_CHECK_INTERVAL_S", "0"))
 FIRE_HAZARD_CONFIDENCE_THRESHOLD = float(os.environ.get("LELAMP_FIRE_HAZARD_CONFIDENCE_THRESHOLD", "0.3"))
 FIRE_HAZARD_OVERLAP_THRESHOLD = float(os.environ.get("LELAMP_FIRE_HAZARD_OVERLAP_THRESHOLD", "0.2"))
 FIRE_HAZARD_CONFIRM_S = float(os.environ.get("LELAMP_FIRE_HAZARD_CONFIRM_S", "10.0"))
