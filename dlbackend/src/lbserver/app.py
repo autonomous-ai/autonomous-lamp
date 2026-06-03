@@ -76,7 +76,6 @@ async def _lifespan(app: FastAPI):
 
 app = FastAPI(title="DL Backend Load Balancer", lifespan=_lifespan)
 app.include_router(crypto_router, prefix="/api/crypto")
-_client = httpx.AsyncClient(timeout=120.0)
 
 
 # ---------------------------------------------------------------------------
@@ -103,13 +102,14 @@ async def proxy_http(request: Request, path: str) -> Response:
         body, encrypted_key = try_decrypt_http_body(body)
 
     try:
-        resp = await _client.request(
-            method=request.method,
-            url=url,
-            headers=headers,
-            params=dict(request.query_params),
-            content=body,
-        )
+        async with httpx.AsyncClient(timeout=settings.lb.http_timeout) as client:
+            resp = await client.request(
+                method=request.method,
+                url=url,
+                headers=headers,
+                params=dict(request.query_params),
+                content=body,
+            )
     except httpx.ConnectError:
         logger.error("[HTTP] Backend unreachable: %s", backend)
         raise HTTPException(status_code=502, detail=f"Backend unreachable: {backend}")
@@ -190,7 +190,7 @@ async def proxy_ws(client_ws: WebSocket, path: str) -> None:
             return
 
     try:
-        async with websockets.connect(ws_url, additional_headers=extra_headers, open_timeout=60) as backend_ws:
+        async with websockets.connect(ws_url, additional_headers=extra_headers, open_timeout=settings.lb.ws_open_timeout) as backend_ws:
             # Forward the first message if it wasn't a key exchange
             if first_msg is not None:
                 await backend_ws.send(first_msg)
