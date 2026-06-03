@@ -13,8 +13,11 @@ When crypto is enabled, the LB handles encryption/decryption:
 import argparse
 import asyncio
 import logging
+import logging.handlers
 import os
+import signal
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 import uvicorn
@@ -279,32 +282,75 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _setup_logging(log_dir: str | None) -> None:
-    if log_dir:
-        from logging.handlers import RotatingFileHandler
-        from pathlib import Path
+def _setup_logging(log_dir: str | None) -> dict | None:
+    """Configure application logging. Returns uvicorn log_config dict (or None for console)."""
+    if not log_dir:
+        logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
+        return None
 
+    try:
         Path(log_dir).mkdir(parents=True, exist_ok=True)
-        for bak in Path(log_dir).glob("lbserver.log*.bak"):
-            bak.unlink()
-        for old in Path(log_dir).glob("lbserver.log*"):
-            old.rename(Path(str(old) + ".bak"))
         log_path = Path(log_dir) / "lbserver.log"
-        handler = RotatingFileHandler(str(log_path), maxBytes=1_048_576, backupCount=3)
+        uvicorn_log_path = Path(log_dir) / "uvicorn.log"
+        # Rotate old logs
+        for prefix in ("lbserver.log", "uvicorn.log"):
+            for bak in Path(log_dir).glob(f"{prefix}*.bak"):
+                bak.unlink()
+            for old in Path(log_dir).glob(f"{prefix}*"):
+                old.rename(Path(str(old) + ".bak"))
+        handler = logging.handlers.RotatingFileHandler(str(log_path), maxBytes=1_048_576, backupCount=3)
         handler.setFormatter(logging.Formatter(LOG_FORMAT))
         logging.basicConfig(level=logging.INFO, handlers=[handler])
-    else:
+
+        return {
+            "version": 1,
+            "disable_existing_loggers": False,
+            "formatters": {
+                "default": {"format": LOG_FORMAT},
+                "access": {"format": LOG_FORMAT},
+            },
+            "handlers": {
+                "default": {
+                    "formatter": "default",
+                    "class": "logging.handlers.RotatingFileHandler",
+                    "filename": str(uvicorn_log_path),
+                    "maxBytes": 1_048_576,
+                    "backupCount": 3,
+                },
+                "access": {
+                    "formatter": "access",
+                    "class": "logging.handlers.RotatingFileHandler",
+                    "filename": str(uvicorn_log_path),
+                    "maxBytes": 1_048_576,
+                    "backupCount": 3,
+                },
+            },
+            "loggers": {
+                "uvicorn": {"handlers": ["default"], "level": "INFO", "propagate": False},
+                "uvicorn.error": {"level": "INFO"},
+                "uvicorn.access": {"handlers": ["access"], "level": "INFO", "propagate": False},
+            },
+        }
+    except Exception as e:
         logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
+        logging.getLogger(__name__).warning("File logging setup failed, using console: %s", e)
+        return None
 
 
 def main() -> None:
     args = parse_args()
-    _setup_logging(args.log_dir)
+    uvicorn_log_config = _setup_logging(args.log_dir)
+
+    def _handle_sigterm(signum, frame):
+        logger.critical("SIGTERM received — shutting down (pid=%d)", os.getpid())
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
 
     if args.pid_file:
-        from pathlib import Path
-
-        Path(args.pid_file).write_text(str(os.getpid()))
+        try:
+            Path(args.pid_file).write_text(str(os.getpid()))
+        except Exception as e:
+            logger.warning("Failed to write PID file %s: %s", args.pid_file, e)
 
     if BACKENDS:
         logger.info("Backends: %s", ", ".join(BACKENDS))
@@ -312,4 +358,4 @@ def main() -> None:
         logger.error("No backends — set LB__BACKENDS in .env")
     logger.info("Internal prefix: %s", INTERNAL_PREFIX)
     logger.info("Starting load balancer on %s:%d", args.host, args.port)
-    uvicorn.run(app, host=args.host, port=args.port)
+    uvicorn.run(app, host=args.host, port=args.port, log_config=uvicorn_log_config)
