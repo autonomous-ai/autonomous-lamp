@@ -64,6 +64,8 @@ TRACKING_FACE_DETECTOR_ENABLED: bool = os.environ.get(
 # --- Sensing: Lamp integration ---
 LAMP_SENSING_URL = "http://127.0.0.1:5000/api/sensing/event"
 LAMP_WELLBEING_LOG_URL = "http://127.0.0.1:5000/api/wellbeing/log"
+GUARD_STATUS_URL = "http://127.0.0.1:5000/api/guard"
+GUARD_CHECK_INTERVAL_S = float(os.environ.get("LELAMP_GUARD_CHECK_INTERVAL_S", "10.0"))
 
 # --- Sensing: Event cooldown ---
 EVENT_COOLDOWN_S = float(os.environ.get("LELAMP_EVENT_COOLDOWN_S", "60.0"))
