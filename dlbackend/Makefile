@@ -167,6 +167,7 @@ stop-runpod-dlserver:
 	@if [ -f $(DLSERVER_PID) ]; then \
 		kill $$(cat $(DLSERVER_PID)) 2>/dev/null || true; \
 		rm -f $(DLSERVER_PID); \
+		sleep 3; \
 		echo "dlserver stopped"; \
 	fi
 
@@ -180,6 +181,7 @@ stop-runpod-lbserver:
 	@if [ -f $(LBSERVER_PID) ]; then \
 		kill $$(cat $(LBSERVER_PID)) 2>/dev/null || true; \
 		rm -f $(LBSERVER_PID); \
+		sleep 3; \
 		echo "lbserver stopped"; \
 	fi
 
