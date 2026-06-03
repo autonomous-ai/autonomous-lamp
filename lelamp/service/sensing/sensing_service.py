@@ -108,6 +108,7 @@ class SensingService:
                 enable_pose=config.POSE_ENABLED,
                 enable_light=True,
                 enable_sound=True,
+                enable_fire_hazard=config.FIRE_HAZARD_ENABLED,
             ),
         )
 
@@ -292,10 +293,9 @@ class SensingService:
             self._perception_orchestrator.reset_dedup()
 
         cur_ts = time.time()
-        # motion.activity has its own 5-min dedup in MotionPerception —
-        # skip the global cooldown so different activities (drink vs
-        # sedentary) are never silently dropped.
-        if event_type not in ("motion.activity", "emotion.detected"):
+        # motion.activity, emotion.detected, and fire_hazard.detected have their
+        # own dedup logic — skip the global cooldown so events are never silently dropped.
+        if event_type not in ("motion.activity", "emotion.detected", "fire_hazard.detected"):
             cd = cooldown if cooldown is not None else config.EVENT_COOLDOWN_S
             last = self._last_event_time.get(event_type, 0)
             if cur_ts - last < cd:
