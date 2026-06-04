@@ -272,11 +272,7 @@ class VoiceService:
         else:
             logger.info("Silero VAD disabled via LELAMP_SILERO_ENABLED=false")
 
-        # Brain integration — all mode-pick / wiring / lifecycle /
-        # VAD-closure-build / call-mode decision logic lives in
-        # ``lelamp.service.brain.orchestrator``. VoiceService just
-        # constructs it with explicit deps and defers via four hooks
-        # (in_live_mode property, start, stop, handle_stt_final).
+        # Brain integration — old BrainOrchestrator (call/live text brain)
         from lelamp.service.brain.orchestrator import BrainOrchestrator
         self._brain = BrainOrchestrator(
             tts_service=self._tts,
@@ -292,6 +288,13 @@ class VoiceService:
             rms_threshold=RMS_THRESHOLD,
             stt_rate=STT_RATE,
         )
+
+        # Realtime voice agent — parallel audio pipeline (Gemini Live / OpenAI Realtime).
+        # When available, mic audio streams to both STT and the realtime model.
+        # The model decides chit-chat (audio/text reply) vs delegate (→ Lamp/OpenClaw).
+        from lelamp.service.realtime.orchestrator import RealtimeOrchestrator
+        self._realtime = RealtimeOrchestrator()
+        self._realtime.start()
 
     def set_music_service(self, music_service) -> None:
         self._music = music_service
@@ -340,6 +343,7 @@ class VoiceService:
     def stop(self):
         self._running = False
         self._brain.stop()
+        self._realtime.stop()
         if self._thread:
             self._thread.join(timeout=5)
             self._thread = None
@@ -1064,6 +1068,14 @@ class VoiceService:
                     break
                 audio_buffer.append(resampled)
 
+                # Parallel: stream to realtime model if available
+                if self._realtime.available:
+                    try:
+                        float_frame = resampled.astype(self._np.float32) / 32767.0
+                        self._realtime.append_audio(float_frame)
+                    except Exception as e:
+                        logger.debug("realtime append_audio failed: %s", e)
+
                 rms = self._rms(data)
                 if rms >= RMS_THRESHOLD:
                     last_speech_time = time.time()
@@ -1120,27 +1132,36 @@ class VoiceService:
                 user = se_user if se_user else UNKNOWN_USER_LABEL
                 logger.info("Final message → Lamp (%s): %r", event_type, final_msg)
 
-                # Half-cascade brain — when active, the orchestrator
-                # decides chit-chat vs delegate from `final_text` (the
-                # STT transcript without speaker prefix) and speaks the
-                # chit-chat reply via TTS itself.
-                #
-                # Return contract (see BrainOrchestrator.handle_stt_final):
-                #   True              — brain spoke; skip Lamp forward.
-                #   False             — brain skipped or off; forward with NO
-                #                       runId so Go mints via NextChatRunID.
-                #   (req_id, run_id)  — brain delegated; forward with these ids
-                #                       so Go reuses them → brain row + OpenClaw
-                #                       turn share one Monitor Flow row.
-                _brain_result = self._brain.handle_stt_final(final_text, user, event_type)
-                if _brain_result is True:
-                    pass  # chit-chat handled locally
-                elif isinstance(_brain_result, tuple) and len(_brain_result) == 2:
-                    _req_id, _run_id = _brain_result
-                    self._send_to_lamp(
-                        final_msg, event_type=event_type,
-                        run_id=_run_id, req_id=_req_id,
-                    )
+                # Realtime voice agent — parallel audio pipeline.
+                # AudioOutput → STT (Deepgram) → text → ElevenLabs TTS → speaker.
+                # Delegate → use parallel STT transcript → Lamp → OpenClaw.
+                # Not available → send directly to Lamp.
+                if self._realtime.available and event_type == "voice":
+                    try:
+                        from lelamp.service.realtime.orchestrator import DelegateSignal
+                        from lelamp.service.realtime.models import AudioOutput as RTAudioOutput
+
+                        self._realtime.commit_audio()
+                        self._init_realtime_stt_session()
+                        delegated = False
+
+                        for output in self._realtime.stream_output():
+                            if isinstance(output, DelegateSignal):
+                                delegated = True
+                                break
+                            if isinstance(output, RTAudioOutput):
+                                self._play_realtime_audio_chunk(output.audio)
+
+                        if delegated:
+                            logger.info("Realtime model delegated → forwarding to Lamp")
+                            self._close_realtime_stt_session()
+                            self._send_to_lamp(final_msg, event_type=event_type)
+                        else:
+                            self._flush_realtime_stt()
+                    except Exception as e:
+                        logger.warning("Realtime processing failed: %s — forwarding to Lamp", e)
+                        self._close_realtime_stt_session()
+                        self._send_to_lamp(final_msg, event_type=event_type)
                 else:
                     self._send_to_lamp(final_msg, event_type=event_type)
 
@@ -1200,6 +1221,58 @@ class VoiceService:
             )
             return True
         return False
+
+    def _init_realtime_stt_session(self) -> None:
+        """Open a fresh Deepgram STT session for streaming realtime audio chunks."""
+        self._rt_stt_transcript_parts: list[str] = []
+        self._rt_stt_session = None
+
+        def _on_transcript(text: str, is_final: bool) -> None:
+            if is_final and text.strip():
+                self._rt_stt_transcript_parts.append(text.strip())
+
+        session = self._stt.create_session()
+        if session.start(_on_transcript):
+            self._rt_stt_session = session
+        else:
+            logger.warning("Failed to start STT session for realtime audio")
+
+    def _play_realtime_audio_chunk(self, audio) -> None:
+        """Convert a float32 audio chunk to int16 PCM and send to the open STT session."""
+        if self._rt_stt_session is None:
+            return
+
+        np = self._np
+        pcm16 = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
+
+        chunk_size = int(STT_RATE * FRAME_DURATION_MS / 1000)
+        for i in range(0, len(pcm16), chunk_size):
+            chunk = pcm16[i:i + chunk_size]
+            if len(chunk) < chunk_size:
+                chunk = np.pad(chunk, (0, chunk_size - len(chunk)))
+            self._rt_stt_session.send_audio(chunk)
+
+    def _flush_realtime_stt(self) -> None:
+        """Close the realtime STT session and speak the transcript via TTS."""
+        if self._rt_stt_session is not None:
+            self._rt_stt_session.close()
+            self._rt_stt_session = None
+
+        transcript = " ".join(self._rt_stt_transcript_parts).strip()
+        self._rt_stt_transcript_parts = []
+
+        if transcript and self._tts is not None:
+            logger.info("Realtime audio → STT → TTS: %r", transcript[:100])
+            self._tts.speak(transcript)
+        elif not transcript:
+            logger.debug("Realtime audio STT produced empty transcript")
+
+    def _close_realtime_stt_session(self) -> None:
+        """Close the realtime STT session without speaking (used on delegate/error)."""
+        if self._rt_stt_session is not None:
+            self._rt_stt_session.close()
+            self._rt_stt_session = None
+        self._rt_stt_transcript_parts = []
 
     def _send_to_lamp(
         self,
