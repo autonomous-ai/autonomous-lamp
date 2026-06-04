@@ -324,3 +324,15 @@ SPEECH_EMOTION_AUDIO_DIR: str = os.environ.get(
     "LELAMP_SPEECH_EMOTION_AUDIO_DIR",
     os.path.join(tempfile.gettempdir(), "lamp-speech-emotion"),
 )
+
+# --- Realtime voice agent (Gemini Live / OpenAI Realtime) ---
+REALTIME_PROVIDER: str = os.environ.get("LELAMP_REALTIME_PROVIDER", "none")  # none | gemini | openai
+REALTIME_GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
+REALTIME_GEMINI_MODEL: str = os.environ.get("LELAMP_GEMINI_LIVE_MODEL", "gemini-3.1-flash-live")
+REALTIME_GEMINI_VOICE: str = os.environ.get("LELAMP_GEMINI_LIVE_VOICE", "Kore")
+REALTIME_GEMINI_SAMPLE_RATE: int = 16000
+REALTIME_OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
+REALTIME_OPENAI_MODEL: str = os.environ.get("LELAMP_OPENAI_REALTIME_MODEL", "gpt-realtime-2")
+REALTIME_OPENAI_VOICE: str = os.environ.get("LELAMP_OPENAI_REALTIME_VOICE", "alloy")
+REALTIME_OPENAI_SAMPLE_RATE: int = 24000
+REALTIME_INSTRUCTIONS: str = os.environ.get("LELAMP_REALTIME_INSTRUCTIONS", "")
