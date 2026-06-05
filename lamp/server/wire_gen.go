@@ -16,11 +16,9 @@ import (
 	"go-lamp.autonomous.ai/internal/monitor"
 	"go-lamp.autonomous.ai/internal/network"
 	"go-lamp.autonomous.ai/internal/statusled"
-	"go-lamp.autonomous.ai/lib/devicebutton"
 	"go-lamp.autonomous.ai/lib/mqtt"
 	"go-lamp.autonomous.ai/server/config"
 	http7 "go-lamp.autonomous.ai/server/buddy/delivery/http"
-	http4 "go-lamp.autonomous.ai/server/device/delivery/gpio"
 	http3 "go-lamp.autonomous.ai/server/device/delivery/http"
 	"go-lamp.autonomous.ai/server/device/delivery/mqtt"
 	"go-lamp.autonomous.ai/server/health/delivery/http"
@@ -48,10 +46,8 @@ func InitializeServer() (*Server, error) {
 		return nil, err
 	}
 	deviceMQTTHandler := mqtthandler.ProvideDeviceMQTTHandler(configConfig, factory, deviceService, service, agentGateway)
-	deviceGPIOHandler := http4.ProvideDeviceGPIOHandler(configConfig, service, agentGateway)
 	agentHandler := http6.ProvideAgentHandler(agentGateway, bus, statusledService)
 	sensingHandler := http5.ProvideSensingHandler(agentGateway, bus, configConfig, statusledService, agentHandler.IsSleeping)
-	deviceButton := devicebutton.ProvideDeviceButtonOptional()
 	ambientService := ambient.ProvideService(bus)
 	healthwatchService := healthwatch.ProvideService(bus, configConfig, statusledService)
 	buddyService, err := buddy.ProvideService()
@@ -59,6 +55,6 @@ func InitializeServer() (*Server, error) {
 		return nil, err
 	}
 	buddyHandler := http7.ProvideBuddyHandler(configConfig, buddyService)
-	server := ProvideServer(configConfig, healthHandler, networkHandler, deviceHandler, deviceMQTTHandler, deviceGPIOHandler, agentHandler, sensingHandler, buddyHandler, deviceService, agentGateway, service, deviceButton, factory, ambientService, healthwatchService, statusledService)
+	server := ProvideServer(configConfig, healthHandler, networkHandler, deviceHandler, deviceMQTTHandler, agentHandler, sensingHandler, buddyHandler, deviceService, agentGateway, service, factory, ambientService, healthwatchService, statusledService)
 	return server, nil
 }

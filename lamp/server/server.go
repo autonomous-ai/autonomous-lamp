@@ -34,14 +34,12 @@ import (
 	"go-lamp.autonomous.ai/internal/healthwatch"
 	"go-lamp.autonomous.ai/internal/network"
 	"go-lamp.autonomous.ai/internal/statusled"
-	devicebutton "go-lamp.autonomous.ai/lib/devicebutton"
 	"go-lamp.autonomous.ai/lib/i18n"
 	"go-lamp.autonomous.ai/lib/lelamp"
 	"go-lamp.autonomous.ai/lib/logger"
 	"go-lamp.autonomous.ai/lib/mqtt"
 	"go-lamp.autonomous.ai/lib/safego"
 	"go-lamp.autonomous.ai/server/config"
-	_deviceGPIODeliver "go-lamp.autonomous.ai/server/device/delivery/gpio"
 	_deviceHttpDeliver "go-lamp.autonomous.ai/server/device/delivery/http"
 	_deviceMQTTDeliver "go-lamp.autonomous.ai/server/device/delivery/mqtt"
 	_healthHttpDeliver "go-lamp.autonomous.ai/server/health/delivery/http"
@@ -63,7 +61,6 @@ type Server struct {
 	networkHandler    _networkHttpDeliver.NetworkHandler
 	deviceHandler     _deviceHttpDeliver.DeviceHandler
 	deviceMQTTHandler _deviceMQTTDeliver.DeviceMQTTHandler
-	deviceGPIOHandler _deviceGPIODeliver.DeviceGPIOHandler
 	agentHandler   _agentHttpDeliver.AgentHandler
 	sensingHandler    _sensingHttpDeliver.SensingHandler
 	buddyHandler      _buddyHttpDeliver.BuddyHandler
@@ -75,8 +72,6 @@ type Server struct {
 	healthWatch    *healthwatch.Service
 	statusLED      *statusled.Service
 
-	// resetButton watches GPIO 23 for press-and-hold >= 10s to trigger factory reset. Nil when GPIO unavailable.
-	deviceButton *devicebutton.DeviceButton
 	// mqttFactory is the optional MQTT factory (nil when broker not configured).
 	mqttFactory *mqtt.Factory
 	// mqttClient is the active MQTT client when setup is complete; guarded by mqttMu.
@@ -119,14 +114,12 @@ func ProvideServer(
 	nh _networkHttpDeliver.NetworkHandler,
 	dh _deviceHttpDeliver.DeviceHandler,
 	dqth _deviceMQTTDeliver.DeviceMQTTHandler,
-	dgph _deviceGPIODeliver.DeviceGPIOHandler,
 	agentH _agentHttpDeliver.AgentHandler,
 	sensingH _sensingHttpDeliver.SensingHandler,
 	buddyH _buddyHttpDeliver.BuddyHandler,
 	ds *device.Service,
 	agentGW domain.AgentGateway,
 	ns *network.Service,
-	deviceBtn *devicebutton.DeviceButton,
 	mqttFactory *mqtt.Factory,
 	ambientSvc *ambient.Service,
 	hw *healthwatch.Service,
@@ -138,14 +131,12 @@ func ProvideServer(
 		networkHandler:    nh,
 		deviceHandler:     dh,
 		deviceMQTTHandler: dqth,
-		deviceGPIOHandler: dgph,
 		agentHandler:   agentH,
 		sensingHandler:    sensingH,
 		buddyHandler:      buddyH,
 		agentGateway:      agentGW,
 		networkService:    ns,
 		deviceService:     ds,
-		deviceButton:      deviceBtn,
 		mqttFactory:       mqttFactory,
 		ambientService:    ambientSvc,
 		healthWatch:       hw,
@@ -504,14 +495,8 @@ func (s *Server) Serve(closeFn func()) error {
 	// English even when STTLanguage is "vi"/"zh-*".
 	i18n.SetConfig(s.config)
 
-	// device button — disabled here so lelamp (Python) gpio_button can grab
-	// GPIO17. Long-press shutdown w/ servo release lives in lelamp.
-	// if err := s.deviceButton.Init(); err == nil {
-	// 	s.deviceButton.Start(context.Background(), s.deviceGPIOHandler.HandlePress, s.deviceGPIOHandler.HandlePressAndHold)
-	// 	defer s.deviceButton.Close()
-	// } else {
-	// 	slog.Info("[device button] can not init")
-	// }
+	// GPIO ownership: lelamp (Python) gpio_button handles GPIO17 long-press
+	// shutdown + servo release. No Go-side button watcher.
 
 	s.handleSetUpCompleteChange(s.config.SetUpCompleted)
 	s.handleDeviceIDChange(s.config.DeviceID)
