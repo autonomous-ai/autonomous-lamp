@@ -51,6 +51,11 @@ class GeminiLiveAgent(VoiceAgentBase):
         self._speech_ended_at: float | None = None
         self._first_audio_received: bool = False
 
+    @property
+    @override
+    def sample_rate(self) -> int:
+        return self._config.sample_rate
+
     def _build_config(self) -> types.LiveConnectConfig:
         live_config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
@@ -64,6 +69,11 @@ class GeminiLiveAgent(VoiceAgentBase):
             system_instruction=self._config.instructions or "",
             input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
+            realtime_input_config=types.RealtimeInputConfig(
+                automatic_activity_detection=types.AutomaticActivityDetection(
+                    disabled=not self._config.vad_enabled,
+                ),
+            ),
         )
 
         if self._tools:

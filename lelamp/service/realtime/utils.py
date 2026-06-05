@@ -1,6 +1,7 @@
 """Audio conversion utilities for PCM16 codec."""
 
 import base64
+from math import gcd
 
 import numpy as np
 import numpy.typing as npt
@@ -31,3 +32,14 @@ def pcm16_bytes_to_float32(data: bytes) -> npt.NDArray[np.float32]:
     """Convert raw PCM16 bytes to float32 [-1.0, 1.0]. Used by Gemini."""
     pcm16 = np.frombuffer(data, dtype=np.int16)
     return (pcm16.astype(np.float32) / 32767.0)
+
+
+def resample_float32(
+    audio: npt.NDArray[np.float32], src_rate: int, dst_rate: int,
+) -> npt.NDArray[np.float32]:
+    """Resample float32 audio from src_rate to dst_rate. No-op if rates match."""
+    if src_rate == dst_rate:
+        return audio
+    import scipy.signal
+    g = gcd(dst_rate, src_rate)
+    return scipy.signal.resample_poly(audio, dst_rate // g, src_rate // g).astype(np.float32)

@@ -33,6 +33,8 @@ from lelamp.service.realtime.voice_agent.base import VoiceAgentBase
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_SAMPLE_RATE = 16000
+
 DELEGATE_TOOL_NAME = "delegate_to_main"
 DELEGATE_TOOL_DESCRIPTION = (
     "Call this when the user's request requires the main system — "
@@ -73,6 +75,13 @@ class RealtimeOrchestrator:
     @property
     def available(self) -> bool:
         return self._agent is not None
+
+    @property
+    def sample_rate(self) -> int:
+        """Target sample rate expected by the realtime provider."""
+        if self._agent is not None:
+            return self._agent.sample_rate
+        return DEFAULT_SAMPLE_RATE
 
     def start(self) -> None:
         """Create the agent based on config and connect."""

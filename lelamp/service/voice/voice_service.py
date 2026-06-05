@@ -23,8 +23,6 @@ from typing import Optional
 
 import requests
 
-from lelamp.service.voice.backchannel import Backchannel
-from lelamp.service.voice.stt_provider import STTProvider
 from lelamp.service.voice._internal.audio_dsp import resample_to_stt, rms
 from lelamp.service.voice._internal.audio_recorder import ArecordStream
 from lelamp.service.voice._internal.config import (
@@ -55,6 +53,12 @@ from lelamp.service.voice._internal.config import (
 from lelamp.service.voice._internal.lamp_sender import LampSender
 from lelamp.service.voice._internal.speaker_decorate import SpeakerDecorator
 from lelamp.service.voice._internal.vad_filters import SileroVADFilter, WebRTCVADFilter
+from lelamp.service.voice.backchannel import Backchannel
+from lelamp.service.voice.stt_provider import STTProvider
+from lelamp import config as lelamp_config
+from lelamp.service.realtime.orchestrator import RealtimeOrchestrator, DelegateSignal
+from lelamp.service.realtime.models import TextOutput as RTTextOutput
+from lelamp.service.realtime.utils import pcm16_bytes_to_float32, resample_float32
 
 logger = logging.getLogger("lelamp.voice")
 
@@ -63,13 +67,13 @@ class VoiceService:
     """Local VAD + pluggable STT provider for autonomous sensing."""
 
     def __init__(
-            self,
-            stt_provider: STTProvider,
-            input_device: Optional[int] = None,
-            tts_service=None,
-            music_service=None,
-            wake_words: Optional[list] = None,
-            alsa_device: Optional[str] = None,
+        self,
+        stt_provider: STTProvider,
+        input_device: Optional[int] = None,
+        tts_service=None,
+        music_service=None,
+        wake_words: Optional[list] = None,
+        alsa_device: Optional[str] = None,
     ):
         self._stt = stt_provider
         self._input_device = input_device
@@ -89,23 +93,31 @@ class VoiceService:
 
         try:
             import numpy as np
+
             self._np = np
         except ImportError:
             logger.warning("numpy not available for voice")
 
         try:
             import sounddevice as sd
+
             self._sd = sd
         except ImportError:
             logger.warning("sounddevice not available")
 
         # WebRTC VAD — fast C-based pre-filter (~0.1ms vs Silero ~20ms).
         # Enable via LELAMP_WEBRTCVAD_ENABLED=true in .env.
-        self._webrtc_vad = WebRTCVADFilter(WEBRTCVAD_AGGRESSIVENESS, self._np) if WEBRTCVAD_ENABLED else None
+        self._webrtc_vad = (
+            WebRTCVADFilter(WEBRTCVAD_AGGRESSIVENESS, self._np)
+            if WEBRTCVAD_ENABLED
+            else None
+        )
         if not WEBRTCVAD_ENABLED:
             logger.info("WebRTC VAD disabled (LELAMP_WEBRTCVAD_ENABLED=false)")
 
-        self._silero_vad = SileroVADFilter(SILERO_MODEL_PATH, self._np) if SILERO_VAD_ENABLED else None
+        self._silero_vad = (
+            SileroVADFilter(SILERO_MODEL_PATH, self._np) if SILERO_VAD_ENABLED else None
+        )
         if not SILERO_VAD_ENABLED:
             logger.info("Silero VAD disabled via LELAMP_SILERO_ENABLED=false")
 
@@ -118,6 +130,9 @@ class VoiceService:
         # Lamp Server event sender (with echo similarity filter)
         self._lamp_sender = LampSender(tts_service=tts_service)
 
+        # Realtime voice agent — parallel audio pipeline (Gemini Live / OpenAI Realtime).
+        self._realtime = RealtimeOrchestrator()
+
     def set_music_service(self, music_service) -> None:
         self._music = music_service
 
@@ -127,11 +142,7 @@ class VoiceService:
 
     @property
     def available(self) -> bool:
-        return (
-                self._sd is not None
-                and self._np is not None
-                and self._stt.available
-        )
+        return self._sd is not None and self._np is not None and self._stt.available
 
     @property
     def listening(self) -> bool:
@@ -149,12 +160,16 @@ class VoiceService:
             )
             return
         self._running = True
+        if lelamp_config.REALTIME_ENABLED:
+            self._realtime.start()
         self._thread = threading.Thread(target=self._loop, daemon=True, name="voice")
         self._thread.start()
         logger.info("VoiceService started (local VAD + %s)", self._stt.name)
 
     def stop(self):
         self._running = False
+        if lelamp_config.REALTIME_ENABLED:
+            self._realtime.stop()
         if self._thread:
             self._thread.join(timeout=5)
             self._thread = None
@@ -175,6 +190,7 @@ class VoiceService:
         try:
             name = self._sd.query_devices(self._input_device)["name"]
             import re as _re
+
             m = _re.search(r"\(hw:(\d+),(\d+)\)", name)
             if m:
                 alsa = f"plughw:{m.group(1)},{m.group(2)}"
@@ -190,6 +206,7 @@ class VoiceService:
             )
             if result.returncode == 0:
                 import re as _re
+
                 for line in result.stdout.splitlines():
                     if line.startswith("card "):
                         m = _re.search(r"card (\d+):", line)
@@ -211,16 +228,30 @@ class VoiceService:
             native = int(info["default_samplerate"])
             # Try to open stream at STT_RATE directly — ALSA plughw does SRC transparently.
             try:
-                with sd.InputStream(device=self._input_device, samplerate=STT_RATE,
-                                    channels=CHANNELS, dtype="int16", blocksize=512):
+                with sd.InputStream(
+                    device=self._input_device,
+                    samplerate=STT_RATE,
+                    channels=CHANNELS,
+                    dtype="int16",
+                    blocksize=512,
+                ):
                     pass
-                logger.info("Audio device opened at %dHz natively (no resample needed)", STT_RATE)
+                logger.info(
+                    "Audio device opened at %dHz natively (no resample needed)",
+                    STT_RATE,
+                )
                 return STT_RATE
             except Exception:
-                logger.info("Audio device native rate: %dHz (will resample to %dHz for STT)", native, STT_RATE)
+                logger.info(
+                    "Audio device native rate: %dHz (will resample to %dHz for STT)",
+                    native,
+                    STT_RATE,
+                )
                 return native
         except Exception as e:
-            logger.warning("Could not detect device rate, defaulting to %dHz: %s", STT_RATE, e)
+            logger.warning(
+                "Could not detect device rate, defaulting to %dHz: %s", STT_RATE, e
+            )
             return STT_RATE
 
     # ------------------------------------------------------------------
@@ -289,13 +320,19 @@ class VoiceService:
             # Prefer arecord backend (same as recording loop) — avoids PortAudio rate errors
             if self._alsa_device is not None:
                 mic_ctx = ArecordStream(
-                    alsa_device=self._alsa_device, rate=device_rate,
-                    channels=CHANNELS, blocksize=window_frames, np=np,
+                    alsa_device=self._alsa_device,
+                    rate=device_rate,
+                    channels=CHANNELS,
+                    blocksize=window_frames,
+                    np=np,
                 )
             else:
                 mic_ctx = self._sd.InputStream(
-                    samplerate=device_rate, channels=CHANNELS, dtype="int16",
-                    blocksize=window_frames, device=self._input_device,
+                    samplerate=device_rate,
+                    channels=CHANNELS,
+                    dtype="int16",
+                    blocksize=window_frames,
+                    device=self._input_device,
                 )
             elapsed = 0.0
             with mic_ctx as tmp_mic:
@@ -306,9 +343,16 @@ class VoiceService:
                     measured = float(np.sqrt(np.mean(data.astype(np.float32) ** 2)))
                     elapsed += ECHO_GATE_WINDOW_S
                     if measured < ECHO_RMS_FLOOR:
-                        logger.info("Reverb decayed (RMS=%.0f < %d) after %.2fs", measured, ECHO_RMS_FLOOR, elapsed)
+                        logger.info(
+                            "Reverb decayed (RMS=%.0f < %d) after %.2fs",
+                            measured,
+                            ECHO_RMS_FLOOR,
+                            elapsed,
+                        )
                         return
-            logger.info("Reverb gate timeout after %.1fs, resuming anyway", ECHO_GATE_MAX_WAIT_S)
+            logger.info(
+                "Reverb gate timeout after %.1fs, resuming anyway", ECHO_GATE_MAX_WAIT_S
+            )
         except Exception as e:
             logger.warning("RMS gate failed, falling back to fixed delay: %s", e)
             time.sleep(1.0)
@@ -326,7 +370,9 @@ class VoiceService:
         """
         logger.info(
             "TTS speaking — barge-in monitor active (threshold=%d, trigger=%d × %dms blocks)",
-            BARGE_IN_RMS_THRESHOLD, BARGE_IN_TRIGGER_FRAMES, BARGE_IN_BLOCK_MS,
+            BARGE_IN_RMS_THRESHOLD,
+            BARGE_IN_TRIGGER_FRAMES,
+            BARGE_IN_BLOCK_MS,
         )
         np = self._np
         device_rate = self._device_rate or STT_RATE
@@ -336,13 +382,19 @@ class VoiceService:
         try:
             if self._alsa_device is not None:
                 mic_ctx = ArecordStream(
-                    alsa_device=self._alsa_device, rate=device_rate,
-                    channels=CHANNELS, blocksize=frame_size, np=np,
+                    alsa_device=self._alsa_device,
+                    rate=device_rate,
+                    channels=CHANNELS,
+                    blocksize=frame_size,
+                    np=np,
                 )
             else:
                 mic_ctx = self._sd.InputStream(
-                    samplerate=device_rate, channels=CHANNELS, dtype="int16",
-                    blocksize=frame_size, device=self._input_device,
+                    samplerate=device_rate,
+                    channels=CHANNELS,
+                    dtype="int16",
+                    blocksize=frame_size,
+                    device=self._input_device,
                 )
             with mic_ctx as mic:
                 while self._running and self._tts_is_speaking():
@@ -358,7 +410,9 @@ class VoiceService:
                         if consecutive >= BARGE_IN_TRIGGER_FRAMES:
                             logger.info(
                                 "BARGE-IN: RMS=%.0f > %d for %d frames → stop TTS",
-                                measured, BARGE_IN_RMS_THRESHOLD, consecutive,
+                                measured,
+                                BARGE_IN_RMS_THRESHOLD,
+                                consecutive,
                             )
                             if self._tts is not None:
                                 self._tts.stop()
@@ -366,7 +420,9 @@ class VoiceService:
                     else:
                         consecutive = 0
         except Exception as e:
-            logger.warning("Barge-in monitor failed (%s) — falling back to passive wait", e)
+            logger.warning(
+                "Barge-in monitor failed (%s) — falling back to passive wait", e
+            )
             while self._running and self._tts_is_speaking():
                 time.sleep(0.2)
         finally:
@@ -388,12 +444,18 @@ class VoiceService:
         # Set LELAMP_AUDIO_INPUT_ALSA=plughw:X,0 in .env to opt in explicitly.
         if self._alsa_device is not None:
             device_rate = STT_RATE  # plughw does SRC; record directly at STT rate
-            logger.info("Using arecord backend (%s) at %dHz", self._alsa_device, device_rate)
+            logger.info(
+                "Using arecord backend (%s) at %dHz", self._alsa_device, device_rate
+            )
         else:
             if self._device_rate is None:
                 self._device_rate = self._detect_device_rate()
             device_rate = self._device_rate
-            logger.info("Using sounddevice backend (device=%s) at %dHz", self._input_device, device_rate)
+            logger.info(
+                "Using sounddevice backend (device=%s) at %dHz",
+                self._input_device,
+                device_rate,
+            )
 
         frame_size = int(device_rate * FRAME_DURATION_MS / 1000)
         self._device_rate = device_rate  # store for _wait_for_tts
@@ -427,8 +489,11 @@ class VoiceService:
                 with mic_ctx as mic:
                     logger.info(
                         "Listening for speech (RMS=%d, rate=%dHz, backend=%s)...",
-                        RMS_THRESHOLD, device_rate,
-                        f"arecord({self._alsa_device})" if self._alsa_device else f"sd({self._input_device})",
+                        RMS_THRESHOLD,
+                        device_rate,
+                        f"arecord({self._alsa_device})"
+                        if self._alsa_device
+                        else f"sd({self._input_device})",
                     )
                     self._vad_loop(mic, frame_size, device_rate)
             except Exception as e:
@@ -493,18 +558,28 @@ class VoiceService:
                             continue
                     # Prepend pre-trigger history from lookback.
                     buffered = len(speech_pre_buffer)
-                    history = list(lookback)[:-buffered] if buffered > 0 else list(lookback)
+                    history = (
+                        list(lookback)[:-buffered] if buffered > 0 else list(lookback)
+                    )
                     all_frames = history + speech_pre_buffer
                     logger.info(
                         "Speech detected (RMS=%.0f) — pre-roll=%d frames (~%dms) + holdoff=%d frames",
-                        energy, len(history), len(history) * FRAME_DURATION_MS, buffered,
+                        energy,
+                        len(history),
+                        len(history) * FRAME_DURATION_MS,
+                        buffered,
                     )
                     speech_pre_buffer = [
-                        resample_to_stt(f, device_rate, STT_RATE, self._np) for f in all_frames
+                        resample_to_stt(f, device_rate, STT_RATE, self._np)
+                        for f in all_frames
                     ]
-                    self._stream_session(mic, frame_size, device_rate,
-                                        preconnected_session=keepalive_session,
-                                        speech_pre_buffer=speech_pre_buffer)
+                    self._stream_session(
+                        mic,
+                        frame_size,
+                        device_rate,
+                        preconnected_session=keepalive_session,
+                        speech_pre_buffer=speech_pre_buffer,
+                    )
                     keepalive_session = None
                     speech_start = None
                     speech_pre_buffer = []
@@ -520,17 +595,29 @@ class VoiceService:
                         if not keepalive_session.start(lambda text, is_final: None):
                             keepalive_session = None
                         else:
-                            logger.info("STT keepalive: pre-connected, waiting for speech...")
+                            logger.info(
+                                "STT keepalive: pre-connected, waiting for speech..."
+                            )
             else:
                 speech_start = None
                 speech_pre_buffer = []
                 if energy >= RMS_THRESHOLD:
-                    logger.debug("VAD: RMS=%.0f above threshold but Silero rejected — not speech", energy)
+                    logger.debug(
+                        "VAD: RMS=%.0f above threshold but Silero rejected — not speech",
+                        energy,
+                    )
 
     # ------------------------------------------------------------------
     # STT streaming session — fires while user is speaking
     # ------------------------------------------------------------------
-    def _stream_session(self, mic, frame_size: int, device_rate: int, preconnected_session=None, speech_pre_buffer=None):
+    def _stream_session(
+        self,
+        mic,
+        frame_size: int,
+        device_rate: int,
+        preconnected_session=None,
+        speech_pre_buffer=None,
+    ):
         """Stream audio to STT provider until silence or TTS interrupts.
 
         Buffer lifecycle (one per call):
@@ -541,7 +628,7 @@ class VoiceService:
                      scope → garbage-collected. NO state leaks to the next
                      ``_stream_session`` call.
         """
-        session = preconnected_session or self._stt.create_session()
+        stt_session = preconnected_session or self._stt.create_session()
 
         longest_partial = [""]
         final_segments = []
@@ -558,7 +645,8 @@ class VoiceService:
         pre_frames_from_vad = len(speech_pre_buffer or [])
         logger.info(
             "Session START — pre_from_vad=%d frames, device_rate=%dHz",
-            pre_frames_from_vad, device_rate,
+            pre_frames_from_vad,
+            device_rate,
         )
 
         def on_transcript(text: str, is_final: bool):
@@ -593,21 +681,23 @@ class VoiceService:
         try:
             if preconnected_session:
                 # Already connected — swap in the real transcript callback.
-                session._on_transcript_cb = on_transcript
+                stt_session._on_transcript_cb = on_transcript
                 logger.info("STT keepalive: reusing pre-connected session")
 
             connect_ok = [False]
             connect_done = threading.Event()
 
             def _do_connect():
-                connect_ok[0] = session.start(on_transcript)
+                connect_ok[0] = stt_session.start(on_transcript)
                 connect_done.set()
 
             if preconnected_session:
                 connect_ok[0] = True
                 connect_done.set()
             else:
-                threading.Thread(target=_do_connect, daemon=True, name="stt-connect").start()
+                threading.Thread(
+                    target=_do_connect, daemon=True, name="stt-connect"
+                ).start()
 
             pre_buffer = []
             while not connect_done.wait(timeout=0.005):
@@ -616,7 +706,9 @@ class VoiceService:
                     break
                 data, overflowed = mic.read(frame_size)
                 if not overflowed:
-                    pre_buffer.append(resample_to_stt(data, device_rate, STT_RATE, self._np))
+                    pre_buffer.append(
+                        resample_to_stt(data, device_rate, STT_RATE, self._np)
+                    )
 
             if not connect_ok[0]:
                 return
@@ -626,10 +718,11 @@ class VoiceService:
             if all_pre:
                 logger.info(
                     "Session FILL (pre-flush) — added %d frames (~%.0fms) to buffer",
-                    len(all_pre), len(all_pre) * FRAME_DURATION_MS,
+                    len(all_pre),
+                    len(all_pre) * FRAME_DURATION_MS,
                 )
                 for frame in all_pre:
-                    session.send_audio(frame)
+                    stt_session.send_audio(frame)
                     audio_buffer.append(frame)
 
             self._listening = True
@@ -643,13 +736,15 @@ class VoiceService:
             last_speech_idx: int = len(audio_buffer) - 1
             # Signal Lamp to show listening LED as soon as mic session opens (before transcript arrives)
             try:
-                requests.post("http://127.0.0.1:5000/api/sensing/event",
-                              json={"type": "voice_listening", "message": "listening"},
-                              timeout=0.3)
+                requests.post(
+                    "http://127.0.0.1:5000/api/sensing/event",
+                    json={"type": "voice_listening", "message": "listening"},
+                    timeout=0.3,
+                )
             except Exception:
                 pass
 
-            while self._running and not session.is_closed():
+            while self._running and not stt_session.is_closed():
                 # If TTS or music starts mid-session, stop streaming immediately
                 if self._tts_is_speaking():
                     logger.info("TTS started mid-session, closing STT to avoid echo")
@@ -660,7 +755,10 @@ class VoiceService:
 
                 # Guard against zombie sessions
                 if (time.time() - session_start) > MAX_SESSION_DURATION_S:
-                    logger.warning("STT session exceeded %ds, force-closing", MAX_SESSION_DURATION_S)
+                    logger.warning(
+                        "STT session exceeded %ds, force-closing",
+                        MAX_SESSION_DURATION_S,
+                    )
                     break
 
                 data, overflowed = mic.read(frame_size)
@@ -669,11 +767,20 @@ class VoiceService:
 
                 resampled = resample_to_stt(data, device_rate, STT_RATE, self._np)
                 try:
-                    session.send_audio(resampled)
+                    stt_session.send_audio(resampled)
                 except Exception as e:
                     logger.warning("send_audio failed (connection dead?): %s", e)
                     break
                 audio_buffer.append(resampled)
+
+                # Parallel: stream to realtime model if available
+                if lelamp_config.REALTIME_ENABLED and self._realtime.available:
+                    try:
+                        audio_f32 = pcm16_bytes_to_float32(resampled)
+                        audio_f32 = resample_float32(audio_f32, STT_RATE, self._realtime.sample_rate)
+                        self._realtime.append_audio(audio_f32)
+                    except Exception as e:
+                        logger.debug("realtime append_audio failed: %s", e)
 
                 energy = rms(data, self._np)
                 if energy >= RMS_THRESHOLD:
@@ -687,7 +794,7 @@ class VoiceService:
         finally:
             self._backchannel.reset()
             self._listening = False
-            session.close()
+            stt_session.close()
             # Combine all final segments + any trailing partial into one transcript.
             if longest_partial[0]:
                 final_segments.append(longest_partial[0])
@@ -707,7 +814,8 @@ class VoiceService:
                     logger.info(
                         "Session TRIM — dropped %d trailing-silence frames (~%.2fs) "
                         "[speaker-recog buffer only; SER keeps full %d frames]",
-                        dropped, dropped * FRAME_DURATION_MS / 1000,
+                        dropped,
+                        dropped * FRAME_DURATION_MS / 1000,
                         len(ser_audio_buffer),
                     )
 
@@ -718,29 +826,73 @@ class VoiceService:
             buf_duration = buf_bytes / (STT_RATE * 2)
             logger.info(
                 "Session END — buffer frames=%d bytes=%d duration=%.2fs transcript=%r",
-                buf_frames, buf_bytes, buf_duration, combined or "(empty)",
+                buf_frames,
+                buf_bytes,
+                buf_duration,
+                combined or "(empty)",
             )
 
             # Prepare message and user for speaker recognition and SER.
             from lelamp.service.voice.speech_emotion.constants import UNKNOWN_USER_LABEL
+
             final_text, event_type = self._decorator.resolve_wake_word_split(combined)
             user = UNKNOWN_USER_LABEL
 
             # 1. Speaker recognize and decorate the final text to send to Lamp.
             if combined:
-                final_msg, se_user = self._decorator.identify_and_decorate(final_text, audio_buffer)
+                final_msg, se_user = self._decorator.identify_and_decorate(
+                    final_text, audio_buffer
+                )
                 user = se_user if se_user else UNKNOWN_USER_LABEL
                 logger.info("Final message → Lamp (%s): %r", event_type, final_msg)
-                self._lamp_sender.send(final_msg, event_type=event_type)
+
+                # Realtime voice agent — parallel audio pipeline.
+                # Delegate → forward transcript to Lamp → OpenClaw.
+                # Chit-chat → speak model's text via TTS, still notify Lamp.
+                if self._realtime.available and event_type == "voice":
+                    try:
+                        self._realtime.commit_audio()
+                        delegated = False
+                        text_parts: list[str] = []
+
+                        for output in self._realtime.stream_output():
+                            if isinstance(output, DelegateSignal):
+                                delegated = True
+                                break
+                            if isinstance(output, RTTextOutput):
+                                text_parts.append(output.text)
+
+                        if delegated:
+                            logger.info("Realtime model delegated → forwarding to Lamp")
+                            self._lamp_sender.send(final_msg, event_type=event_type)
+                        else:
+                            transcript = "".join(text_parts).strip()
+                            if transcript and self._tts is not None:
+                                logger.info("Realtime chit-chat → TTS: %r", transcript[:100])
+                                self._tts.speak(transcript)
+                            # Notify Lamp: user message + realtime model's reply
+                            self._lamp_sender.send(
+                                f"[HANDLED] {final_msg}\n[REPLY] {transcript}",
+                                event_type=event_type,
+                            )
+                    except Exception as e:
+                        logger.warning("Realtime processing failed: %s — forwarding to Lamp", e)
+                        self._lamp_sender.send(final_msg, event_type=event_type)
+                else:
+                    self._lamp_sender.send(final_msg, event_type=event_type)
 
             # 2. Submit SER — uses the UNTRIMMED snapshot so laughter / sighs
-            self._decorator.submit_speech_emotion_from_session(ser_audio_buffer, user=user)
+            self._decorator.submit_speech_emotion_from_session(
+                ser_audio_buffer, user=user
+            )
 
             # Clear listening LED
             try:
-                requests.post("http://127.0.0.1:5000/api/sensing/event",
-                              json={"type": "voice_listening_end", "message": "done"},
-                              timeout=0.3)
+                requests.post(
+                    "http://127.0.0.1:5000/api/sensing/event",
+                    json={"type": "voice_listening_end", "message": "done"},
+                    timeout=0.3,
+                )
             except Exception:
                 pass
 
@@ -750,9 +902,11 @@ class VoiceService:
             # 8s, reset to idle — but only if current emotion is still
             # "listening" so we don't stomp on a real LLM-driven emotion.
             if listening_emotion_sent[0]:
+
                 def _reset_if_still_listening():
                     try:
                         from lelamp import app_state
+
                         if app_state._current_emotion == "listening":
                             requests.post(
                                 "http://127.0.0.1:5001/emotion",
@@ -761,6 +915,7 @@ class VoiceService:
                             )
                     except Exception as e:
                         logger.warning("listening idle-reset failed: %s", e)
+
                 threading.Timer(8.0, _reset_if_still_listening).start()
 
             # Buffer is a local variable — once this function returns it is

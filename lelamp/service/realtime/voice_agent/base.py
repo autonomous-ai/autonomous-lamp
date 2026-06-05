@@ -19,6 +19,11 @@ class VoiceAgentBase(ABC):
     def __init__(self, tools: list[dict[str, Any]] | None = None):
         self._tools: list[dict[str, Any]] = tools or []
 
+    @property
+    @abstractmethod
+    def sample_rate(self) -> int:
+        """Sample rate expected by this provider (Hz)."""
+
     @abstractmethod
     async def connect(self) -> None:
         """Establish connection to the realtime provider."""

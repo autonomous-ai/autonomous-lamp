@@ -326,6 +326,7 @@ SPEECH_EMOTION_AUDIO_DIR: str = os.environ.get(
 )
 
 # --- Realtime voice agent (Gemini Live / OpenAI Realtime) ---
+REALTIME_ENABLED: bool = os.environ.get("LELAMP_REALTIME_ENABLED", "false").lower() in ("1", "true", "yes")
 REALTIME_PROVIDER: str = os.environ.get("LELAMP_REALTIME_PROVIDER", "none")  # none | gemini | openai
 REALTIME_GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
 REALTIME_GEMINI_MODEL: str = os.environ.get("LELAMP_GEMINI_LIVE_MODEL", "gemini-3.1-flash-live")
@@ -336,3 +337,7 @@ REALTIME_OPENAI_MODEL: str = os.environ.get("LELAMP_OPENAI_REALTIME_MODEL", "gpt
 REALTIME_OPENAI_VOICE: str = os.environ.get("LELAMP_OPENAI_REALTIME_VOICE", "alloy")
 REALTIME_OPENAI_SAMPLE_RATE: int = 24000
 REALTIME_INSTRUCTIONS: str = os.environ.get("LELAMP_REALTIME_INSTRUCTIONS", "")
+# Turn detection / VAD: "server_vad" | "semantic_vad" | "off"
+# "off" disables server-side VAD — the caller controls turn boundaries via commit_audio().
+# Gemini Live always uses server VAD (this setting is ignored for Gemini).
+REALTIME_TURN_DETECTION: str = os.environ.get("LELAMP_REALTIME_TURN_DETECTION", "off")

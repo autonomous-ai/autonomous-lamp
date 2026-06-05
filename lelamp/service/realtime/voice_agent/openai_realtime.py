@@ -48,6 +48,11 @@ class OpenAIRealtimeAgent(VoiceAgentBase):
         self._connection: AsyncRealtimeConnection | None = None
         self._speech_stopped_at: float | None = None
 
+    @property
+    @override
+    def sample_rate(self) -> int:
+        return self._config.sample_rate
+
     @override
     async def connect(self) -> None:
         logger.info("Connecting to OpenAI Realtime API (model=%s)", self._config.model)
