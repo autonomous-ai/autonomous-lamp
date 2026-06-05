@@ -1,6 +1,5 @@
 """Input data models sent to the realtime voice agent."""
 
-from typing import Any
 
 import cv2.typing as cv2t
 import numpy as np
