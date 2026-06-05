@@ -251,7 +251,7 @@ class AutonomousSTTSession(STTSession):
 
 
 class AutonomousSTT(STTProvider):
-    """Autonomous AI streaming STT provider (Deepgram wrapper behind campaign-api)."""STT keep
+    """Autonomous AI streaming STT provider (Deepgram wrapper behind campaign-api)."""
 
     def __init__(self, api_key: str, base_url: str, sample_rate: int = 16000,
                  channels: int = 1, model: str = DEFAULT_MODEL, language: Optional[str] = None,
