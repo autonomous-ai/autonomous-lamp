@@ -576,21 +576,74 @@ case "\$APP" in
   lamp|openclaw|bootstrap|web|lelamp|claude-desktop-buddy) ;;
   *) echo "Unknown app: \$APP"; exit 1 ;;
 esac
-META=\$(mktemp); ZIP=\$(mktemp); DIR=\$(mktemp -d)
-trap 'rm -f "\$META" "\$ZIP"; rm -rf "\$DIR"' EXIT
-curl -fsSL -H "Cache-Control: no-cache" -o "\$META" "\$OTA_METADATA_URL"
-KEY="\$APP"
-VERSION=\$(jq -r --arg a "\$KEY" '.[\$a].version // empty' "\$META")
-URL=\$(jq -r --arg a "\$KEY" '.[\$a].url // empty' "\$META")
-[ -z "\$URL" ] && { echo "No URL in metadata for \$APP"; exit 1; }
-curl -fsSL -o "\$ZIP" "\$URL"
-unzip -o -q "\$ZIP" -d "\$DIR"
-case "\$APP" in
-  lamp)      cp -f "\$(find \$DIR -type f -executable | head -1 || find \$DIR -type f | head -1)" /usr/local/bin/lamp-server      && chmod +x /usr/local/bin/lamp-server      && systemctl restart lamp ;;
-  bootstrap) cp -f "\$(find \$DIR -type f -executable | head -1 || find \$DIR -type f | head -1)" /usr/local/bin/bootstrap-server && chmod +x /usr/local/bin/bootstrap-server && systemctl restart bootstrap ;;
-  web)       rm -rf /usr/share/nginx/html/setup/* && cp -a "\$DIR"/* /usr/share/nginx/html/setup/ ;;
-  *)         echo "manual update for \$APP not implemented in this stub" ;;
-esac
+METADATA_TMP=\$(mktemp)
+ZIP_TMP=""
+trap 'rm -f "\$METADATA_TMP" "\$ZIP_TMP"' EXIT
+curl -fsSL -H "Cache-Control: no-cache" -H "Pragma: no-cache" -o "\$METADATA_TMP" "\$OTA_METADATA_URL" || { echo "Failed to fetch metadata"; exit 1; }
+VERSION=\$(jq -r --arg a "\$APP" '.[\$a].version // empty' "\$METADATA_TMP")
+URL=\$(jq -r --arg a "\$APP" '.[\$a].url // empty' "\$METADATA_TMP")
+[ -z "\$VERSION" ] && { echo "Metadata has no version for \$APP"; exit 1; }
+echo "Installing \$APP \$VERSION..."
+if [ "\$APP" = "lamp" ]; then
+  [ -z "\$URL" ] && { echo "No url for lamp"; exit 1; }
+  ZIP_TMP=\$(mktemp); DIR=\$(mktemp -d)
+  curl -fsSL -H "Cache-Control: no-cache" -o "\$ZIP_TMP" "\$URL"
+  unzip -o -q "\$ZIP_TMP" -d "\$DIR"
+  BIN=\$(find "\$DIR" -type f -executable 2>/dev/null | head -1)
+  [ -z "\$BIN" ] && BIN=\$(find "\$DIR" -type f 2>/dev/null | head -1)
+  cp -f "\$BIN" /usr/local/bin/lamp-server && chmod +x /usr/local/bin/lamp-server
+  rm -rf "\$DIR"
+  systemctl restart lamp 2>/dev/null || true
+elif [ "\$APP" = "bootstrap" ]; then
+  [ -z "\$URL" ] && { echo "No url for bootstrap"; exit 1; }
+  ZIP_TMP=\$(mktemp); DIR=\$(mktemp -d)
+  curl -fsSL -H "Cache-Control: no-cache" -o "\$ZIP_TMP" "\$URL"
+  unzip -o -q "\$ZIP_TMP" -d "\$DIR"
+  BIN=\$(find "\$DIR" -type f -executable 2>/dev/null | head -1)
+  [ -z "\$BIN" ] && BIN=\$(find "\$DIR" -type f 2>/dev/null | head -1)
+  cp -f "\$BIN" /usr/local/bin/bootstrap-server && chmod +x /usr/local/bin/bootstrap-server
+  rm -rf "\$DIR"
+  systemctl restart bootstrap 2>/dev/null || true
+elif [ "\$APP" = "web" ]; then
+  [ -z "\$URL" ] && { echo "No url for web"; exit 1; }
+  ZIP_TMP=\$(mktemp); DIR=\$(mktemp -d)
+  curl -fsSL -H "Cache-Control: no-cache" -o "\$ZIP_TMP" "\$URL"
+  unzip -o -q "\$ZIP_TMP" -d "\$DIR"
+  rm -rf /usr/share/nginx/html/setup/*
+  cp -a "\$DIR"/* /usr/share/nginx/html/setup/
+  rm -rf "\$DIR"
+  systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+elif [ "\$APP" = "openclaw" ]; then
+  VER="\${VERSION:-latest}"
+  npm install -g "openclaw@\${VER}" || { echo "npm install openclaw failed"; exit 1; }
+  openclaw plugins install "@openclaw/discord@\${VER}" --force 2>&1 || echo "WARN: discord plugin install failed"
+  openclaw plugins install "@openclaw/slack@\${VER}" --force 2>&1 || echo "WARN: slack plugin install failed"
+  systemctl restart openclaw 2>/dev/null || true
+elif [ "\$APP" = "lelamp" ]; then
+  [ -z "\$URL" ] && { echo "No url for lelamp"; exit 1; }
+  ZIP_TMP=\$(mktemp)
+  curl -fsSL -H "Cache-Control: no-cache" -o "\$ZIP_TMP" "\$URL"
+  LELAMP_DIR="/opt/lelamp"
+  unzip -o -q "\$ZIP_TMP" -d "\$LELAMP_DIR"
+  UV_BIN=\$(command -v uv || echo "/root/.local/bin/uv")
+  find /root/.cache/uv -name "lerobot.egg-info" -type d 2>/dev/null | xargs rm -rf
+  rm -rf "\$LELAMP_DIR/.venv"
+  cd "\$LELAMP_DIR" && "\$UV_BIN" sync --python 3.12 --extra hardware || { echo "uv sync failed"; exit 1; }
+  cd /
+  systemctl restart lamp-lelamp 2>/dev/null || true
+elif [ "\$APP" = "claude-desktop-buddy" ]; then
+  [ -z "\$URL" ] && { echo "No url for claude-desktop-buddy"; exit 1; }
+  ZIP_TMP=\$(mktemp); DIR=\$(mktemp -d)
+  curl -fsSL -H "Cache-Control: no-cache" -o "\$ZIP_TMP" "\$URL"
+  BUDDY_DIR="/opt/claude-desktop-buddy"
+  mkdir -p "\$BUDDY_DIR"
+  unzip -o -q "\$ZIP_TMP" -d "\$DIR"
+  [ -f "\$DIR/buddy-plugin" ] && cp -f "\$DIR/buddy-plugin" "\$BUDDY_DIR/buddy-plugin" && chmod +x "\$BUDDY_DIR/buddy-plugin"
+  [ ! -f "/root/config/buddy.json" ] && [ -f "\$DIR/config/buddy.json" ] && mkdir -p /root/config && cp -f "\$DIR/config/buddy.json" /root/config/buddy.json
+  echo "\$VERSION" > "\$BUDDY_DIR/VERSION_BUDDY"
+  rm -rf "\$DIR"
+  systemctl restart claude-desktop-buddy 2>/dev/null || true
+fi
 echo "\$APP updated to \$VERSION"
 EOFSCRIPT
 chmod +x /usr/local/bin/software-update
