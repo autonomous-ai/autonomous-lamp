@@ -3,7 +3,6 @@
 All values are read from lelamp.config (environment variables).
 """
 
-from pathlib import Path
 from typing import Optional
 
 from pydantic import BaseModel
@@ -17,26 +16,6 @@ from lelamp.service.realtime.enums import (
     OpenAITurnDetectionType,
     OpenAIVoice,
 )
-
-_RESOURCES_DIR = Path(__file__).parent / "resources"
-_DEFAULT_PROMPT_PATH = _RESOURCES_DIR / "system_prompt.md"
-
-
-def _load_instructions() -> str:
-    """Load instructions from env var or fall back to default prompt file.
-
-    The placeholder {language} is replaced with the lamp's stt_language.
-    """
-    env_instructions: str = app_config.REALTIME_INSTRUCTIONS
-    if env_instructions:
-        return env_instructions
-    try:
-        template: str = _DEFAULT_PROMPT_PATH.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        return ""
-    lang: str | None = _load_language()
-    return template.replace("{language}", lang or "English")
-
 
 def _load_language() -> str | None:
     """Load language from Lamp's config.json (stt_language field)."""
@@ -61,7 +40,7 @@ class OpenAIConfig(BaseModel):
     api_key: str = app_config.REALTIME_OPENAI_API_KEY
     model: str = app_config.REALTIME_OPENAI_MODEL
     voice: OpenAIVoice = OpenAIVoice(app_config.REALTIME_OPENAI_VOICE)
-    instructions: str = _load_instructions()
+    instructions: str = ""
     sample_rate: int = app_config.REALTIME_OPENAI_SAMPLE_RATE
     language: Optional[str] = _load_language()
     turn_detection_type: Optional[OpenAITurnDetectionType] = _parse_turn_detection(
@@ -76,7 +55,7 @@ class GeminiConfig(BaseModel):
     api_key: str = app_config.REALTIME_GEMINI_API_KEY
     model: str = app_config.REALTIME_GEMINI_MODEL
     voice: GeminiVoice = GeminiVoice(app_config.REALTIME_GEMINI_VOICE)
-    instructions: str = _load_instructions()
+    instructions: str = ""
     sample_rate: int = app_config.REALTIME_GEMINI_SAMPLE_RATE
     language: Optional[str] = _load_language()
     use_language_codes: bool = app_config.REALTIME_GEMINI_USE_LANGUAGE_CODES

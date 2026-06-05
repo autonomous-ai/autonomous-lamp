@@ -325,30 +325,30 @@ SPEECH_EMOTION_AUDIO_DIR: str = os.environ.get(
     os.path.join(tempfile.gettempdir(), "lamp-speech-emotion"),
 )
 
-# --- Realtime voice agent (Gemini Live / OpenAI Realtime) ---
+# --- Realtime voice agent ---
 REALTIME_ENABLED: bool = os.environ.get("LELAMP_REALTIME_ENABLED", "false").lower() in ("1", "true", "yes")
 REALTIME_PROVIDER: str = os.environ.get("LELAMP_REALTIME_PROVIDER", "none")  # none | gemini | openai
+# Turn detection / VAD: "server_vad" | "semantic_vad" | "off"
+# For Gemini: "off" disables automatic activity detection; any other value enables it.
+# For OpenAI: maps to turn_detection type in session config.
+REALTIME_TURN_DETECTION: str = os.environ.get("LELAMP_REALTIME_TURN_DETECTION", "off")
+
+# --- Realtime: Gemini Live ---
 REALTIME_GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
 REALTIME_GEMINI_MODEL: str = os.environ.get("LELAMP_GEMINI_LIVE_MODEL", "gemini-3.1-flash-live")
 REALTIME_GEMINI_VOICE: str = os.environ.get("LELAMP_GEMINI_LIVE_VOICE", "Kore")
 REALTIME_GEMINI_SAMPLE_RATE: int = 16000
+REALTIME_GEMINI_THINKING_LEVEL: str = os.environ.get("LELAMP_GEMINI_THINKING_LEVEL", "HIGH")
+REALTIME_GEMINI_USE_LANGUAGE_CODES: bool = os.environ.get("LELAMP_GEMINI_USE_LANGUAGE_CODES", "false").lower() in ("1", "true", "yes")
+
+# --- Realtime: OpenAI Realtime ---
 REALTIME_OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
 REALTIME_OPENAI_MODEL: str = os.environ.get("LELAMP_OPENAI_REALTIME_MODEL", "gpt-realtime-2")
 REALTIME_OPENAI_VOICE: str = os.environ.get("LELAMP_OPENAI_REALTIME_VOICE", "alloy")
 REALTIME_OPENAI_SAMPLE_RATE: int = 24000
-REALTIME_INSTRUCTIONS: str = os.environ.get("LELAMP_REALTIME_INSTRUCTIONS", "")
-# Turn detection / VAD: "server_vad" | "semantic_vad" | "off"
-# "off" disables server-side VAD — the caller controls turn boundaries via commit_audio().
-# For Gemini: "off" disables automatic activity detection; any other value enables it.
-# For OpenAI: maps to turn_detection type in session config.
-REALTIME_TURN_DETECTION: str = os.environ.get("LELAMP_REALTIME_TURN_DETECTION", "off")
-# Gemini: thinking level — MINIMAL | LOW | MEDIUM | HIGH
-REALTIME_GEMINI_THINKING_LEVEL: str = os.environ.get("LELAMP_GEMINI_THINKING_LEVEL", "HIGH")
-# Gemini: language_codes in transcription config (only supported in Enterprise Agent Platform mode)
-REALTIME_GEMINI_USE_LANGUAGE_CODES: bool = os.environ.get("LELAMP_GEMINI_USE_LANGUAGE_CODES", "false").lower() in ("1", "true", "yes")
-# OpenAI: reasoning effort — minimal | low | medium | high | xhigh
 REALTIME_OPENAI_REASONING_EFFORT: str = os.environ.get("LELAMP_OPENAI_REASONING_EFFORT", "xhigh")
-# Context manager
+
+# --- Realtime: Context manager ---
 REALTIME_WORKSPACE_DIR: str = os.environ.get("LELAMP_OPENCLAW_WORKSPACE_DIR", "/root/.openclaw/workspace")
 REALTIME_MEMORY_PATH: str = os.environ.get("LELAMP_REALTIME_MEMORY_PATH", "/tmp/realtime_memory.jsonl")
 REALTIME_MAX_MEMORY_ENTRIES: int = int(os.environ.get("LELAMP_REALTIME_MAX_MEMORY_ENTRIES", "1000"))
