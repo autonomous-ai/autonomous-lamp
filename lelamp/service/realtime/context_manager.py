@@ -99,9 +99,9 @@ class RealtimeContextManager:
             return ""
 
     def _load_lamp_identity(self) -> str:
-        """Load SOUL.md and IDENTITY.md from the workspace."""
+        """Load SOUL.md, IDENTITY.md, and USER.md from the workspace."""
         parts: list[str] = []
-        for filename in ("SOUL.md", "IDENTITY.md"):
+        for filename in ("SOUL.md", "IDENTITY.md", "USER.md"):
             path: Path = self._workspace / filename
             try:
                 content: str = path.read_text(encoding="utf-8").strip()
