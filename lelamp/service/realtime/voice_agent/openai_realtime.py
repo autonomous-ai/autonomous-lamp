@@ -1,30 +1,33 @@
-"""OpenAI Realtime voice agent implementation."""
+"""OpenAI Realtime voice agent implementation — queue-based threading, fully sync."""
 
 import base64
 import logging
+import queue
 import time
-from collections.abc import AsyncGenerator
 from typing import Any, override
 
 import cv2
 import numpy as np
-import numpy.typing as npt
-from openai import AsyncOpenAI
-from openai.resources.realtime.realtime import AsyncRealtimeConnection
+from openai import OpenAI
+from openai.resources.realtime.realtime import RealtimeConnection
 
 from lelamp.service.realtime.config import OpenAIConfig
 from lelamp.service.realtime.enums import TurnDetectionType
 from lelamp.service.realtime.exceptions import OpenAIRealtimeError
 from lelamp.service.realtime.models import (
+    AgentInputEvent,
+    AudioCommitEvent,
     AudioInput,
     AudioOutput,
     FunctionCallOutput,
     FunctionCallResultInput,
     ImageInput,
     InputBase,
-    OutputBase,
+    InputEvent,
+    OutputEvent,
     TextInput,
     TextOutput,
+    TurnDoneEvent,
 )
 from lelamp.service.realtime.utils import base64_pcm16_to_float32, float32_to_base64_pcm16
 from lelamp.service.realtime.voice_agent.base import VoiceAgentBase
@@ -40,30 +43,30 @@ class OpenAIRealtimeAgent(VoiceAgentBase):
         tools: list[dict[str, Any]] | None = None,
     ) -> None:
         super().__init__(tools=tools)
-        self._config = config
-        self._client = AsyncOpenAI(
-            api_key=config.api_key,
-            base_url=config.base_url,
-        )
-        self._connection: AsyncRealtimeConnection | None = None
+        self._config: OpenAIConfig = config
+        self._client: OpenAI = OpenAI(api_key=config.api_key)
+        self._connection: RealtimeConnection | None = None
         self._speech_stopped_at: float | None = None
+        self._reconnect_max_retries: int = 3
+        self._reconnect_delay_s: float = 2.0
 
     @property
     @override
     def sample_rate(self) -> int:
         return self._config.sample_rate
 
-    @override
-    async def connect(self) -> None:
+    # --- Sync internals ---
+
+    def _sync_connect(self) -> None:
         logger.info("Connecting to OpenAI Realtime API (model=%s)", self._config.model)
 
-        self._connection = await self._client.realtime.connect(
+        self._connection = self._client.realtime.connect(
             model=self._config.model,
         ).enter()
 
-        turn_detection = None
+        turn_detection: dict[str, str] | None = None
         if self._config.turn_detection_type is not None:
-            td_type = self._config.turn_detection_type
+            td_type: TurnDetectionType = self._config.turn_detection_type
             if td_type == TurnDetectionType.SERVER_VAD:
                 turn_detection = {"type": "server_vad"}
             elif td_type == TurnDetectionType.SEMANTIC_VAD:
@@ -94,99 +97,101 @@ class OpenAIRealtimeAgent(VoiceAgentBase):
                 "effort": self._config.reasoning_effort.value,
             }
 
-        await self._connection.session.update(session=session_config)
+        self._connection.session.update(session=session_config)
         logger.info("OpenAI Realtime session open (voice=%s)", self._config.voice)
 
-    @override
-    async def disconnect(self) -> None:
+    def _sync_disconnect(self) -> None:
         if self._connection is not None:
             logger.info("Disconnecting from OpenAI Realtime API")
-            await self._connection.close()
+            self._connection.close()
             self._connection = None
 
-    @override
-    async def send(self, inputs: list[InputBase]) -> None:
+    def _sync_send_input(self, input: InputBase) -> None:
         if self._connection is None:
-            raise RuntimeError("Not connected")
+            return
 
-        for inp in inputs:
-            if isinstance(inp, TextInput):
-                await self._connection.conversation.item.create(
-                    item={
-                        "type": "message",
-                        "role": "user",
-                        "content": [{"type": "input_text", "text": inp.text}],
-                    }
-                )
+        if isinstance(input, AudioInput):
+            b64_audio: str = float32_to_base64_pcm16(input.audio)
+            self._connection.input_audio_buffer.append(audio=b64_audio)
 
-            elif isinstance(inp, AudioInput):
-                b64_audio = float32_to_base64_pcm16(inp.audio)
-                await self._connection.input_audio_buffer.append(audio=b64_audio)
-                await self._connection.input_audio_buffer.commit()
+        elif isinstance(input, TextInput):
+            self._connection.conversation.item.create(
+                item={
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": input.text}],
+                }
+            )
 
-            elif isinstance(inp, ImageInput):
-                _, buf = cv2.imencode(".png", inp.image)
-                b64_img = base64.b64encode(buf.tobytes()).decode("ascii")
-                data_uri = f"data:image/png;base64,{b64_img}"
-                await self._connection.conversation.item.create(
-                    item={
-                        "type": "message",
-                        "role": "user",
-                        "content": [{"type": "input_image", "image_url": data_uri}],
-                    }
-                )
+        elif isinstance(input, ImageInput):
+            _: bool
+            buf: np.ndarray
+            _, buf = cv2.imencode(".png", input.image)
+            b64_img: str = base64.b64encode(buf.tobytes()).decode("ascii")
+            data_uri: str = f"data:image/png;base64,{b64_img}"
+            self._connection.conversation.item.create(
+                item={
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_image", "image_url": data_uri}],
+                }
+            )
 
-            elif isinstance(inp, FunctionCallResultInput):
-                await self._connection.conversation.item.create(
-                    item={
-                        "type": "function_call_output",
-                        "call_id": inp.call_id,
-                        "output": inp.output,
-                    }
-                )
+        elif isinstance(input, FunctionCallResultInput):
+            self._connection.conversation.item.create(
+                item={
+                    "type": "function_call_output",
+                    "call_id": input.call_id,
+                    "output": input.output,
+                }
+            )
+            self._connection.response.create()
 
-            else:
-                raise ValueError(f"Unsupported input type: {type(inp)}")
-
-        await self._connection.response.create()
-
-    @override
-    async def receive(
-        self, *, stop_on_done: bool = True
-    ) -> AsyncGenerator[OutputBase, None]:
+    def _sync_commit(self) -> None:
         if self._connection is None:
-            raise RuntimeError("Not connected")
+            return
+        self._connection.input_audio_buffer.commit()
+        self._connection.response.create()
 
-        async for event in self._connection:
+    def _sync_receive_turn(self) -> None:
+        """Read one full turn from the connection, put outputs on _recv_queue."""
+        if self._connection is None:
+            return
+
+        for event in self._connection:
             match event.type:
                 case "input_audio_buffer.speech_stopped":
                     self._speech_stopped_at = time.perf_counter()
 
                 case "response.output_text.delta":
-                    yield TextOutput(text=event.delta)
+                    self._recv_queue.put(OutputEvent(output=TextOutput(text=event.delta)))
 
                 case "response.output_audio.delta":
                     if self._speech_stopped_at is not None:
-                        latency_ms = (time.perf_counter() - self._speech_stopped_at) * 1000
+                        latency_ms: float = (time.perf_counter() - self._speech_stopped_at) * 1000
                         logger.info("Response latency: %.0fms", latency_ms)
                         self._speech_stopped_at = None
-                    yield AudioOutput(audio=base64_pcm16_to_float32(event.delta))
+                    self._recv_queue.put(OutputEvent(
+                        output=AudioOutput(audio=base64_pcm16_to_float32(event.delta)),
+                    ))
 
                 case "response.output_audio_transcript.delta":
-                    yield TextOutput(text=event.delta)
+                    self._recv_queue.put(OutputEvent(output=TextOutput(text=event.delta)))
 
                 case "response.function_call_arguments.done":
                     logger.debug("Function call: %s (call_id=%s)", event.name, event.call_id)
-                    yield FunctionCallOutput(
-                        name=event.name,
-                        arguments=event.arguments,
-                        call_id=event.call_id,
-                    )
+                    self._recv_queue.put(OutputEvent(
+                        output=FunctionCallOutput(
+                            name=event.name,
+                            arguments=event.arguments,
+                            call_id=event.call_id,
+                        ),
+                    ))
 
                 case "response.done":
                     logger.debug("Response complete")
-                    if stop_on_done:
-                        break
+                    self._recv_queue.put(TurnDoneEvent())
+                    return
 
                 case "error":
                     logger.error("Realtime API error: %s", event.error)
@@ -195,16 +200,63 @@ class OpenAIRealtimeAgent(VoiceAgentBase):
                 case _:
                     pass
 
-    @override
-    async def commit_audio(self) -> None:
-        if self._connection is None:
-            raise RuntimeError("Not connected")
-        await self._connection.input_audio_buffer.commit()
+    # --- Reconnect ---
+
+    def _reconnect(self) -> None:
+        self._connected.clear()
+        for attempt in range(1, self._reconnect_max_retries + 1):
+            try:
+                logger.info(
+                    "Reconnecting (attempt %d/%d)", attempt, self._reconnect_max_retries
+                )
+                self._sync_disconnect()
+                self._sync_connect()
+                self._connected.set()
+                return
+            except Exception as e:
+                logger.warning("Reconnect attempt %d failed: %s", attempt, e)
+                if attempt < self._reconnect_max_retries:
+                    time.sleep(self._reconnect_delay_s)
+        logger.error("All reconnect attempts failed")
+
+    # --- VoiceAgentBase implementation ---
 
     @override
-    async def append_audio(self, audio: npt.NDArray[np.float32]) -> None:
-        if self._connection is None:
-            raise RuntimeError("Not connected")
+    def _do_connect(self) -> None:
+        self._sync_connect()
 
-        b64_audio = float32_to_base64_pcm16(audio)
-        await self._connection.input_audio_buffer.append(audio=b64_audio)
+    @override
+    def _do_disconnect(self) -> None:
+        self._sync_disconnect()
+
+    @override
+    def _send_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                event: AgentInputEvent = self._send_queue.get(timeout=1)
+            except queue.Empty:
+                continue
+
+            try:
+                if isinstance(event, AudioCommitEvent):
+                    self._sync_commit()
+                elif isinstance(event, InputEvent) and event.input is not None:
+                    self._sync_send_input(event.input)
+            except Exception as e:
+                logger.warning("Send failed: %s — reconnecting", e)
+                self._reconnect()
+
+    @override
+    def _recv_loop(self) -> None:
+        while not self._stop_event.is_set():
+            if not self._connected.is_set():
+                self._connected.wait(timeout=1)
+                continue
+            try:
+                self._sync_receive_turn()
+            except OpenAIRealtimeError as e:
+                logger.warning("Recv failed: %s — reconnecting", e)
+                self._reconnect()
+            except Exception as e:
+                logger.exception("Unexpected error in recv loop: %s", e)
+                self._reconnect()

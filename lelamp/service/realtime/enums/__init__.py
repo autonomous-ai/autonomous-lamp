@@ -16,6 +16,18 @@ class OutputTypeEnum(StrEnum):
     FUNCTION_CALL = "function_call"
 
 
+class InputEventTypeEnum(StrEnum):
+    """Types for the agent send queue."""
+    INPUT = "input"
+    AUDIO_COMMIT = "audio_commit"
+
+
+class OutputEventTypeEnum(StrEnum):
+    """Types for the agent receive queue."""
+    OUTPUT = "output"
+    TURN_DONE = "turn_done"
+
+
 class TurnDetectionType(StrEnum):
     SERVER_VAD = "server_vad"
     SEMANTIC_VAD = "semantic_vad"

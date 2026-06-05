@@ -1,33 +1,38 @@
-"""Gemini Live voice agent implementation."""
+"""Gemini Live voice agent implementation — queue-based threading."""
 
+import asyncio
 import json
 import logging
+import queue
+import threading
 import time
-from collections.abc import AsyncGenerator
 from contextlib import AsyncExitStack
 from typing import Any, override
 
 import cv2
+import google.genai as genai
 import numpy as np
 import numpy.typing as npt
-from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
 from google.genai.live import AsyncSession
 from websockets.exceptions import ConnectionClosed
 
 from lelamp.service.realtime.config import GeminiConfig
-from lelamp.service.realtime.exceptions import GeminiLiveError
 from lelamp.service.realtime.models import (
+    AgentInputEvent,
+    AudioCommitEvent,
     AudioInput,
     AudioOutput,
     FunctionCallOutput,
     FunctionCallResultInput,
     ImageInput,
     InputBase,
-    OutputBase,
+    InputEvent,
+    OutputEvent,
     TextInput,
     TextOutput,
+    TurnDoneEvent,
 )
 from lelamp.service.realtime.utils import float32_to_pcm16_bytes, pcm16_bytes_to_float32
 from lelamp.service.realtime.voice_agent.base import VoiceAgentBase
@@ -36,6 +41,12 @@ logger = logging.getLogger(__name__)
 
 
 class GeminiLiveAgent(VoiceAgentBase):
+    DEFAULT_RECONNECT_MAX_RETRIES: int = 3
+    DEFAULT_RECONNECT_DELAY_S: float = 2.0
+    DEFAULT_SEND_TIMEOUT_S: float = 10.0
+    DEFAULT_RECV_TIMEOUT_S: float = 300.0
+    DEFAULT_QUEUE_POLL_S: float = 1.0
+    DEFAULT_JOIN_TIMEOUT_S: float = 5.0
 
     def __init__(
         self,
@@ -43,13 +54,23 @@ class GeminiLiveAgent(VoiceAgentBase):
         tools: list[dict[str, Any]] | None = None,
     ) -> None:
         super().__init__(tools=tools)
-        self._config = config
-        self._client = genai.Client(api_key=config.api_key)
+        self._config: GeminiConfig = config
+        self._client: genai.Client = genai.Client(api_key=config.api_key)
         self._session: AsyncSession | None = None
         self._exit_stack: AsyncExitStack | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._io_thread: threading.Thread | None = None
         self._resumption_handle: str | None = None
         self._speech_ended_at: float | None = None
         self._first_audio_received: bool = False
+        self._vad_disabled: bool = not config.vad_enabled
+        self._activity_started: bool = False
+        self._reconnect_max_retries: int = self.DEFAULT_RECONNECT_MAX_RETRIES
+        self._reconnect_delay_s: float = self.DEFAULT_RECONNECT_DELAY_S
+        self._send_timeout_s: float = self.DEFAULT_SEND_TIMEOUT_S
+        self._recv_timeout_s: float = self.DEFAULT_RECV_TIMEOUT_S
+        self._queue_poll_s: float = self.DEFAULT_QUEUE_POLL_S
+        self._join_timeout_s: float = self.DEFAULT_JOIN_TIMEOUT_S
 
     @property
     @override
@@ -57,8 +78,8 @@ class GeminiLiveAgent(VoiceAgentBase):
         return self._config.sample_rate
 
     def _build_config(self) -> types.LiveConnectConfig:
-        live_config = types.LiveConnectConfig(
-            response_modalities=["AUDIO"],
+        live_config: types.LiveConnectConfig = types.LiveConnectConfig(
+            response_modalities=[types.Modality.AUDIO],
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
@@ -71,13 +92,13 @@ class GeminiLiveAgent(VoiceAgentBase):
             output_audio_transcription=types.AudioTranscriptionConfig(),
             realtime_input_config=types.RealtimeInputConfig(
                 automatic_activity_detection=types.AutomaticActivityDetection(
-                    disabled=not self._config.vad_enabled,
+                    disabled=self._vad_disabled,
                 ),
             ),
         )
 
         if self._tools:
-            declarations = [
+            declarations: list[types.FunctionDeclaration] = [
                 types.FunctionDeclaration(
                     name=tool["name"],
                     description=tool.get("description", ""),
@@ -94,8 +115,9 @@ class GeminiLiveAgent(VoiceAgentBase):
 
         return live_config
 
-    @override
-    async def connect(self) -> None:
+    # --- Async internals (run on private event loop) ---
+
+    async def _async_connect(self) -> None:
         logger.info("Connecting to Gemini Live API (model=%s)", self._config.model)
         self._exit_stack = AsyncExitStack()
         self._session = await self._exit_stack.enter_async_context(
@@ -106,147 +128,232 @@ class GeminiLiveAgent(VoiceAgentBase):
         )
         logger.info("Gemini Live session open (voice=%s)", self._config.voice)
 
-    async def reconnect(self) -> None:
-        logger.info("Reconnecting with resumption handle")
-        await self.disconnect()
-        await self.connect()
-
-    @override
-    async def disconnect(self) -> None:
+    async def _async_disconnect(self) -> None:
         if self._exit_stack is not None:
             logger.info("Disconnecting from Gemini Live API")
             await self._exit_stack.aclose()
             self._exit_stack = None
             self._session = None
 
-    @override
-    async def send(self, inputs: list[InputBase]) -> None:
+    async def _async_send_input(self, input: InputBase) -> None:
         if self._session is None:
-            raise RuntimeError("Not connected")
-
-        for inp in inputs:
-            if isinstance(inp, TextInput):
-                await self._session.send_client_content(
-                    turns=types.Content(
-                        parts=[types.Part(text=inp.text)],
-                        role="user",
-                    ),
-                    turn_complete=True,
-                )
-
-            elif isinstance(inp, AudioInput):
-                pcm_bytes = float32_to_pcm16_bytes(inp.audio)
+            return
+        if isinstance(input, AudioInput):
+            # When VAD is disabled, send activityStart before first audio
+            if self._vad_disabled and not self._activity_started:
                 await self._session.send_realtime_input(
-                    audio=types.Blob(
-                        data=pcm_bytes,
-                        mime_type=f"audio/pcm;rate={self._config.sample_rate}",
+                    activity_start=types.ActivityStart()
+                )
+                self._activity_started = True
+                logger.debug("Sent activityStart (manual VAD)")
+
+            self._speech_ended_at = time.perf_counter()
+            pcm_bytes: bytes = float32_to_pcm16_bytes(input.audio)
+            await self._session.send_realtime_input(
+                audio=types.Blob(
+                    data=pcm_bytes,
+                    mime_type=f"audio/pcm;rate={self._config.sample_rate}",
+                )
+            )
+        elif isinstance(input, TextInput):
+            await self._session.send_client_content(
+                turns=types.Content(
+                    parts=[types.Part(text=input.text)],
+                    role="user",
+                ),
+                turn_complete=True,
+            )
+        elif isinstance(input, ImageInput):
+            _: bool
+            buf: npt.NDArray[np.uint8]
+            _, buf = cv2.imencode(".jpg", input.image)
+            await self._session.send_realtime_input(
+                video=types.Blob(data=buf.tobytes(), mime_type="image/jpeg")
+            )
+        elif isinstance(input, FunctionCallResultInput):
+            await self._session.send_tool_response(
+                function_responses=[
+                    types.FunctionResponse(
+                        id=input.call_id,
+                        response=json.loads(input.output),
                     )
-                )
+                ]
+            )
 
-            elif isinstance(inp, ImageInput):
-                _, buf = cv2.imencode(".jpg", inp.image)
-                await self._session.send_realtime_input(
-                    video=types.Blob(
-                        data=buf.tobytes(),
-                        mime_type="image/jpeg",
-                    )
-                )
-
-            elif isinstance(inp, FunctionCallResultInput):
-                await self._session.send_tool_response(
-                    function_responses=[
-                        types.FunctionResponse(
-                            id=inp.call_id,
-                            response=json.loads(inp.output),
-                        )
-                    ]
-                )
-
-            else:
-                raise ValueError(f"Unsupported input type: {type(inp)}")
-
-    @override
-    async def receive(
-        self, *, stop_on_done: bool = True
-    ) -> AsyncGenerator[OutputBase, None]:
+    async def _async_commit(self) -> None:
         if self._session is None:
-            raise RuntimeError("Not connected")
+            return
+        if self._vad_disabled and self._activity_started:
+            await self._session.send_realtime_input(activity_end=types.ActivityEnd())
+            self._activity_started = False
+            logger.debug("Sent activityEnd (manual VAD)")
 
+    async def _async_receive_turn(self) -> None:
+        """Read one full turn from the session, put outputs on _recv_queue."""
+        if self._session is None:
+            return
         self._first_audio_received = False
 
-        while True:
-            try:
-                async for message in self._session.receive():
-                    if message.server_content:
-                        content = message.server_content
+        async for message in self._session.receive():
+            if message.server_content:
+                content = message.server_content
 
-                        if content.model_turn and content.model_turn.parts:
-                            for part in content.model_turn.parts:
-                                if part.inline_data and part.inline_data.data:
-                                    if not self._first_audio_received:
-                                        self._first_audio_received = True
-                                        if self._speech_ended_at is not None:
-                                            latency_ms = (time.perf_counter() - self._speech_ended_at) * 1000
-                                            logger.info("Response latency: %.0fms", latency_ms)
-                                            self._speech_ended_at = None
-                                    yield AudioOutput(
-                                        audio=pcm16_bytes_to_float32(part.inline_data.data),
-                                    )
-                                elif part.text:
-                                    yield TextOutput(text=part.text)
+                if content.model_turn and content.model_turn.parts:
+                    for part in content.model_turn.parts:
+                        if part.inline_data and part.inline_data.data:
+                            if not self._first_audio_received:
+                                self._first_audio_received = True
+                                if self._speech_ended_at is not None:
+                                    latency_ms: float = (
+                                        time.perf_counter() - self._speech_ended_at
+                                    ) * 1000
+                                    logger.info("Response latency: %.0fms", latency_ms)
+                                    self._speech_ended_at = None
+                            self._recv_queue.put(
+                                OutputEvent(
+                                    output=AudioOutput(
+                                        audio=pcm16_bytes_to_float32(
+                                            part.inline_data.data
+                                        )
+                                    ),
+                                )
+                            )
+                        elif part.text:
+                            self._recv_queue.put(
+                                OutputEvent(output=TextOutput(text=part.text))
+                            )
 
-                        if content.output_transcription and content.output_transcription.text:
-                            yield TextOutput(text=content.output_transcription.text)
+                if content.output_transcription and content.output_transcription.text:
+                    self._recv_queue.put(
+                        OutputEvent(
+                            output=TextOutput(text=content.output_transcription.text),
+                        )
+                    )
 
-                        if content.interrupted:
-                            logger.debug("Response interrupted")
-                            self._first_audio_received = False
+                if content.interrupted:
+                    logger.debug("Response interrupted")
+                    self._first_audio_received = False
 
-                        if content.turn_complete:
-                            logger.debug("Turn complete")
-                            self._first_audio_received = False
-                            if stop_on_done:
-                                return
+                if content.turn_complete:
+                    logger.debug("Turn complete")
+                    self._first_audio_received = False
+                    self._recv_queue.put(TurnDoneEvent())
+                    return
 
-                    elif message.tool_call and message.tool_call.function_calls:
-                        for fc in message.tool_call.function_calls:
-                            logger.debug("Function call: %s (call_id=%s)", fc.name, fc.id)
-                            yield FunctionCallOutput(
+            elif message.tool_call and message.tool_call.function_calls:
+                for fc in message.tool_call.function_calls:
+                    logger.debug("Function call: %s (call_id=%s)", fc.name, fc.id)
+                    self._recv_queue.put(
+                        OutputEvent(
+                            output=FunctionCallOutput(
                                 name=fc.name or "",
                                 arguments=json.dumps(fc.args) if fc.args else "{}",
                                 call_id=fc.id or "",
-                            )
+                            ),
+                        )
+                    )
 
-                    if message.session_resumption_update:
-                        update = message.session_resumption_update
-                        if update.new_handle:
-                            self._resumption_handle = update.new_handle
+            if message.session_resumption_update:
+                update = message.session_resumption_update
+                if update.new_handle:
+                    self._resumption_handle = update.new_handle
 
-                    if message.go_away:
-                        logger.warning("Server go_away (time_left=%s), reconnecting...", message.go_away.time_left)
-                        await self.reconnect()
-                        break
+            if message.go_away:
+                logger.warning(
+                    "Server go_away (time_left=%s)", message.go_away.time_left
+                )
+                raise ConnectionClosed(None, None)
 
-            except (ConnectionClosed, genai_errors.APIError) as e:
-                logger.warning("Connection lost (%s), reconnecting...", e)
-                await self.reconnect()
+    # --- Reconnect ---
+
+    def _reconnect(self) -> None:
+        self._connected.clear()
+        self._activity_started = False
+        if self._loop is None:
+            logger.error("Cannot reconnect — event loop is None")
+            return
+        for attempt in range(1, self._reconnect_max_retries + 1):
+            try:
+                logger.info(
+                    "Reconnecting (attempt %d/%d)", attempt, self._reconnect_max_retries
+                )
+                self._submit_and_wait(self._async_disconnect())
+                self._submit_and_wait(self._async_connect())
+                self._connected.set()
+                return
+            except Exception as e:
+                logger.warning("Reconnect attempt %d failed: %s", attempt, e)
+                if attempt < self._reconnect_max_retries:
+                    time.sleep(self._reconnect_delay_s)
+        logger.error("All reconnect attempts failed")
+
+    # --- VoiceAgentBase implementation ---
+
+    def _submit_and_wait(self, coro: Any, timeout: float = 30.0) -> Any:
+        """Submit a coroutine to the IO thread's loop and block until done."""
+        if self._loop is None:
+            raise RuntimeError("Event loop is None")
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=timeout)
+
+    @override
+    def _do_connect(self) -> None:
+        """Spawn IO thread with event loop, connect on it. Blocks until ready."""
+        self._loop = asyncio.new_event_loop()
+        self._io_thread = threading.Thread(
+            target=self._loop.run_forever, daemon=True, name="gemini-io",
+        )
+        self._io_thread.start()
+        self._submit_and_wait(self._async_connect())
+
+    @override
+    def _do_disconnect(self) -> None:
+        if self._loop is not None:
+            try:
+                self._submit_and_wait(self._async_disconnect())
+            except Exception:
+                pass
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            if self._io_thread is not None:
+                self._io_thread.join(timeout=self._join_timeout_s)
+                self._io_thread = None
+            self._loop.close()
+            self._loop = None
+
+    @override
+    def _send_loop(self) -> None:
+        while not self._stop_event.is_set():
+            if self._loop is None:
+                break
+            try:
+                event: AgentInputEvent = self._send_queue.get(timeout=self._queue_poll_s)
+            except queue.Empty:
                 continue
 
-    @override
-    async def commit_audio(self) -> None:
-        # Gemini processes audio incrementally — no explicit commit needed.
-        pass
+            try:
+                if isinstance(event, AudioCommitEvent):
+                    self._submit_and_wait(self._async_commit(), timeout=self._send_timeout_s)
+                elif isinstance(event, InputEvent):
+                    self._submit_and_wait(self._async_send_input(event.input), timeout=self._send_timeout_s)
+            except (ConnectionClosed, genai_errors.APIError) as e:
+                logger.warning("Send failed: %s — reconnecting", e)
+                self._reconnect()
+            except Exception as e:
+                logger.warning("Send error: %s — reconnecting", e)
+                self._reconnect()
 
     @override
-    async def append_audio(self, audio: npt.NDArray[np.float32]) -> None:
-        if self._session is None:
-            raise RuntimeError("Not connected")
-
-        self._speech_ended_at = time.perf_counter()
-        pcm_bytes = float32_to_pcm16_bytes(audio)
-        await self._session.send_realtime_input(
-            audio=types.Blob(
-                data=pcm_bytes,
-                mime_type=f"audio/pcm;rate={self._config.sample_rate}",
-            )
-        )
+    def _recv_loop(self) -> None:
+        while not self._stop_event.is_set():
+            if self._loop is None:
+                break
+            if not self._connected.is_set():
+                _ = self._connected.wait(timeout=self._queue_poll_s)
+                continue
+            try:
+                self._submit_and_wait(self._async_receive_turn(), timeout=self._recv_timeout_s)
+            except (ConnectionClosed, genai_errors.APIError) as e:
+                logger.warning("Recv failed: %s — reconnecting", e)
+                self._reconnect()
+            except Exception as e:
+                logger.exception("Unexpected error in recv loop: %s", e)
+                self._reconnect()
