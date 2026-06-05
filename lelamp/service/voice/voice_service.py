@@ -907,10 +907,11 @@ class VoiceService:
                 logger.info("Final message → Lamp (%s): %r", event_type, final_msg)
 
                 if rt_handled:
-                    # Realtime already spoke — notify Lamp with tags
+                    # Realtime already spoke — notify Lamp with tags, skip echo filter
                     self._lamp_sender.send(
                         f"[HANDLED] {final_msg}\n[REPLY] {rt_transcript}",
                         event_type=event_type,
+                        skip_echo=True,
                     )
                 else:
                     # Delegated or realtime not active — send to Lamp normally
