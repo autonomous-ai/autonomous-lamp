@@ -115,6 +115,7 @@ class GPIOButtonHandler:
         if rgb is None:
             return
         try:
+            state._stop_current_effect()
             rgb.dispatch(RGB_CMD_SOLID, color, priority=Priority.HIGH)
         except Exception as e:
             logger.warning("LED dispatch failed: %s", e)
