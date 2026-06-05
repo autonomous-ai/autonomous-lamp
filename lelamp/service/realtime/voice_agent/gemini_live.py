@@ -78,6 +78,9 @@ class GeminiLiveAgent(VoiceAgentBase):
         return self._config.sample_rate
 
     def _build_config(self) -> types.LiveConnectConfig:
+        lang: str | None = self._config.language
+        lang_codes: list[str] | None = [lang] if lang else None
+
         live_config: types.LiveConnectConfig = types.LiveConnectConfig(
             response_modalities=[types.Modality.AUDIO],
             speech_config=types.SpeechConfig(
@@ -85,15 +88,21 @@ class GeminiLiveAgent(VoiceAgentBase):
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
                         voice_name=self._config.voice.value,
                     )
-                )
+                ),
+                language_code=lang,
             ),
-            system_instruction=self._config.instructions or "",
-            input_audio_transcription=types.AudioTranscriptionConfig(),
-            output_audio_transcription=types.AudioTranscriptionConfig(),
+            system_instruction=self._config.instructions,
+            input_audio_transcription=None,
+            output_audio_transcription=types.AudioTranscriptionConfig(
+                language_codes=lang_codes,
+            ),
             realtime_input_config=types.RealtimeInputConfig(
                 automatic_activity_detection=types.AutomaticActivityDetection(
                     disabled=self._vad_disabled,
                 ),
+            ),
+            thinking_config=types.ThinkingConfig(
+                thinking_level=self._config.thinking_level.value,
             ),
         )
 

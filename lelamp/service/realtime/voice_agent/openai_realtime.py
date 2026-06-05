@@ -12,7 +12,7 @@ from openai import OpenAI
 from openai.resources.realtime.realtime import RealtimeConnection
 
 from lelamp.service.realtime.config import OpenAIConfig
-from lelamp.service.realtime.enums import TurnDetectionType
+from lelamp.service.realtime.enums import OpenAITurnDetectionType
 from lelamp.service.realtime.exceptions import OpenAIRealtimeError
 from lelamp.service.realtime.models import (
     AgentInputEvent,
@@ -29,14 +29,16 @@ from lelamp.service.realtime.models import (
     TextOutput,
     TurnDoneEvent,
 )
-from lelamp.service.realtime.utils import base64_pcm16_to_float32, float32_to_base64_pcm16
+from lelamp.service.realtime.utils import (
+    base64_pcm16_to_float32,
+    float32_to_base64_pcm16,
+)
 from lelamp.service.realtime.voice_agent.base import VoiceAgentBase
 
 logger = logging.getLogger(__name__)
 
 
 class OpenAIRealtimeAgent(VoiceAgentBase):
-
     def __init__(
         self,
         config: OpenAIConfig,
@@ -66,15 +68,19 @@ class OpenAIRealtimeAgent(VoiceAgentBase):
 
         turn_detection: dict[str, str] | None = None
         if self._config.turn_detection_type is not None:
-            td_type: TurnDetectionType = self._config.turn_detection_type
-            if td_type == TurnDetectionType.SERVER_VAD:
+            td_type: OpenAITurnDetectionType = self._config.turn_detection_type
+            if td_type == OpenAITurnDetectionType.SERVER_VAD:
                 turn_detection = {"type": "server_vad"}
-            elif td_type == TurnDetectionType.SEMANTIC_VAD:
+            elif td_type == OpenAITurnDetectionType.SEMANTIC_VAD:
                 turn_detection = {"type": "semantic_vad"}
+
+        instructions: str = self._config.instructions
+        if self._config.language:
+            instructions = f"Speak and response in strictly {self._config.language}.\n\n{instructions}"
 
         session_config: dict[str, Any] = {
             "type": "realtime",
-            "instructions": self._config.instructions or "",
+            "instructions": instructions,
             "output_modalities": ["audio"],
             "audio": {
                 "input": {
@@ -164,29 +170,43 @@ class OpenAIRealtimeAgent(VoiceAgentBase):
                     self._speech_stopped_at = time.perf_counter()
 
                 case "response.output_text.delta":
-                    self._recv_queue.put(OutputEvent(output=TextOutput(text=event.delta)))
+                    self._recv_queue.put(
+                        OutputEvent(output=TextOutput(text=event.delta))
+                    )
 
                 case "response.output_audio.delta":
                     if self._speech_stopped_at is not None:
-                        latency_ms: float = (time.perf_counter() - self._speech_stopped_at) * 1000
+                        latency_ms: float = (
+                            time.perf_counter() - self._speech_stopped_at
+                        ) * 1000
                         logger.info("Response latency: %.0fms", latency_ms)
                         self._speech_stopped_at = None
-                    self._recv_queue.put(OutputEvent(
-                        output=AudioOutput(audio=base64_pcm16_to_float32(event.delta)),
-                    ))
+                    self._recv_queue.put(
+                        OutputEvent(
+                            output=AudioOutput(
+                                audio=base64_pcm16_to_float32(event.delta)
+                            ),
+                        )
+                    )
 
                 case "response.output_audio_transcript.delta":
-                    self._recv_queue.put(OutputEvent(output=TextOutput(text=event.delta)))
+                    self._recv_queue.put(
+                        OutputEvent(output=TextOutput(text=event.delta))
+                    )
 
                 case "response.function_call_arguments.done":
-                    logger.debug("Function call: %s (call_id=%s)", event.name, event.call_id)
-                    self._recv_queue.put(OutputEvent(
-                        output=FunctionCallOutput(
-                            name=event.name,
-                            arguments=event.arguments,
-                            call_id=event.call_id,
-                        ),
-                    ))
+                    logger.debug(
+                        "Function call: %s (call_id=%s)", event.name, event.call_id
+                    )
+                    self._recv_queue.put(
+                        OutputEvent(
+                            output=FunctionCallOutput(
+                                name=event.name,
+                                arguments=event.arguments,
+                                call_id=event.call_id,
+                            ),
+                        )
+                    )
 
                 case "response.done":
                     logger.debug("Response complete")
