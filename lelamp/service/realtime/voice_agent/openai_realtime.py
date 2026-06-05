@@ -74,13 +74,9 @@ class OpenAIRealtimeAgent(VoiceAgentBase):
             elif td_type == OpenAITurnDetectionType.SEMANTIC_VAD:
                 turn_detection = {"type": "semantic_vad"}
 
-        instructions: str = self._config.instructions
-        if self._config.language:
-            instructions = f"Speak and response in strictly {self._config.language}.\n\n{instructions}"
-
         session_config: dict[str, Any] = {
             "type": "realtime",
-            "instructions": instructions,
+            "instructions": self._config.instructions,
             "output_modalities": ["audio"],
             "audio": {
                 "input": {
@@ -102,6 +98,11 @@ class OpenAIRealtimeAgent(VoiceAgentBase):
             session_config["reasoning"] = {
                 "effort": self._config.reasoning_effort.value,
             }
+
+        truncation_cfg: dict[str, Any] = {"type": self._config.truncation_type.value}
+        if self._config.truncation_type.value == "retention_ratio":
+            truncation_cfg["retention_ratio"] = self._config.truncation_retention_ratio
+        session_config["truncation"] = truncation_cfg
 
         self._connection.session.update(session=session_config)
         logger.info("OpenAI Realtime session open (voice=%s)", self._config.voice)

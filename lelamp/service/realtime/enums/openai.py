@@ -16,6 +16,12 @@ class OpenAIReasoningEffort(StrEnum):
     XHIGH = "xhigh"
 
 
+class OpenAITruncationType(StrEnum):
+    AUTO = "auto"
+    DISABLED = "disabled"
+    RETENTION_RATIO = "retention_ratio"
+
+
 class OpenAIVoice(StrEnum):
     ALLOY = "alloy"
     ASH = "ash"

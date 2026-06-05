@@ -887,6 +887,11 @@ class VoiceService:
                         if rt_transcript and self._tts is not None:
                             logger.info("[realtime] Speaking via TTS: %r", rt_transcript[:100])
                             self._tts.speak(rt_transcript)
+                        # Save turn to realtime memory
+                        self._realtime.save_turn(
+                            user_text=combined or "(audio only)",
+                            agent_text=rt_transcript or "(no transcript)",
+                        )
                 except Exception as e:
                     logger.warning("[realtime] Processing failed: %s — will forward to Lamp", e)
                     rt_delegated = True  # fall through to Lamp on error

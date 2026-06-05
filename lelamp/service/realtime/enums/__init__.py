@@ -3,6 +3,7 @@
 from lelamp.service.realtime.enums.gemini import GeminiThinkingLevel, GeminiVoice
 from lelamp.service.realtime.enums.openai import (
     OpenAIReasoningEffort,
+    OpenAITruncationType,
     OpenAITurnDetectionType,
     OpenAIVoice,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "OutputEventTypeEnum",
     "OpenAITurnDetectionType",
     "OpenAIReasoningEffort",
+    "OpenAITruncationType",
     "OpenAIVoice",
     "GeminiThinkingLevel",
     "GeminiVoice",

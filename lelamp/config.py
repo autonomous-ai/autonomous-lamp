@@ -339,5 +339,19 @@ REALTIME_OPENAI_SAMPLE_RATE: int = 24000
 REALTIME_INSTRUCTIONS: str = os.environ.get("LELAMP_REALTIME_INSTRUCTIONS", "")
 # Turn detection / VAD: "server_vad" | "semantic_vad" | "off"
 # "off" disables server-side VAD — the caller controls turn boundaries via commit_audio().
-# Gemini Live always uses server VAD (this setting is ignored for Gemini).
+# For Gemini: "off" disables automatic activity detection; any other value enables it.
+# For OpenAI: maps to turn_detection type in session config.
 REALTIME_TURN_DETECTION: str = os.environ.get("LELAMP_REALTIME_TURN_DETECTION", "off")
+# Gemini: thinking level — MINIMAL | LOW | MEDIUM | HIGH
+REALTIME_GEMINI_THINKING_LEVEL: str = os.environ.get("LELAMP_GEMINI_THINKING_LEVEL", "HIGH")
+# Gemini: language_codes in transcription config (only supported in Enterprise Agent Platform mode)
+REALTIME_GEMINI_USE_LANGUAGE_CODES: bool = os.environ.get("LELAMP_GEMINI_USE_LANGUAGE_CODES", "false").lower() in ("1", "true", "yes")
+# OpenAI: reasoning effort — minimal | low | medium | high | xhigh
+REALTIME_OPENAI_REASONING_EFFORT: str = os.environ.get("LELAMP_OPENAI_REASONING_EFFORT", "xhigh")
+# Context manager
+REALTIME_WORKSPACE_DIR: str = os.environ.get("LELAMP_OPENCLAW_WORKSPACE_DIR", "/root/.openclaw/workspace")
+REALTIME_MEMORY_PATH: str = os.environ.get("LELAMP_REALTIME_MEMORY_PATH", "/tmp/realtime_memory.jsonl")
+REALTIME_MAX_MEMORY_ENTRIES: int = int(os.environ.get("LELAMP_REALTIME_MAX_MEMORY_ENTRIES", "1000"))
+REALTIME_MEMORY_TRIM_KEEP: int = int(os.environ.get("LELAMP_REALTIME_MEMORY_TRIM_KEEP", "500"))
+REALTIME_LAMP_MEMORY_COUNT: int = int(os.environ.get("LELAMP_REALTIME_LAMP_MEMORY_COUNT", "20"))
+REALTIME_MEMORY_COUNT: int = int(os.environ.get("LELAMP_REALTIME_MEMORY_COUNT", "20"))

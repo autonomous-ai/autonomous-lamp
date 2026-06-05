@@ -79,7 +79,9 @@ class GeminiLiveAgent(VoiceAgentBase):
 
     def _build_config(self) -> types.LiveConnectConfig:
         lang: str | None = self._config.language
-        lang_codes: list[str] | None = [lang] if lang else None
+        lang_codes: list[str] | None = (
+            [lang] if lang and self._config.use_language_codes else None
+        )
 
         live_config: types.LiveConnectConfig = types.LiveConnectConfig(
             response_modalities=[types.Modality.AUDIO],
@@ -103,6 +105,13 @@ class GeminiLiveAgent(VoiceAgentBase):
             ),
             thinking_config=types.ThinkingConfig(
                 thinking_level=self._config.thinking_level.value,
+            ),
+            context_window_compression=(
+                types.ContextWindowCompressionConfig(
+                    sliding_window=types.SlidingWindow(),
+                )
+                if self._config.context_window_compression
+                else None
             ),
         )
 

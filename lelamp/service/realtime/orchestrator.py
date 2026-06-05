@@ -22,7 +22,8 @@ import numpy as np
 import numpy.typing as npt
 
 import lelamp.config as config
-from lelamp.service.realtime.config import GeminiConfig, OpenAIConfig
+from lelamp.service.realtime.config import GeminiConfig, OpenAIConfig, _load_language
+from lelamp.service.realtime.context_manager import RealtimeContextManager
 from lelamp.service.realtime.models import (
     FunctionCallOutput,
     FunctionCallResultInput,
@@ -69,6 +70,9 @@ class RealtimeOrchestrator:
     ) -> None:
         self._tools: list[dict[str, Any]] = [DELEGATE_TOOL] + (extra_tools or [])
         self._agent: VoiceAgentBase | None = None
+        self._context: RealtimeContextManager = RealtimeContextManager(
+            language=_load_language() or "English",
+        )
 
     @property
     def available(self) -> bool:
@@ -88,15 +92,22 @@ class RealtimeOrchestrator:
             logger.info("Realtime orchestrator disabled (provider=%s)", provider)
             return
 
+        instructions: str = self._context.build_instructions()
+        logger.info("Context manager built instructions (%d chars)", len(instructions))
+
         if provider == "gemini":
             from lelamp.service.realtime.voice_agent.gemini_live import GeminiLiveAgent
 
-            self._agent = GeminiLiveAgent(config=GeminiConfig(), tools=self._tools)
+            self._agent = GeminiLiveAgent(
+                config=GeminiConfig(instructions=instructions), tools=self._tools,
+            )
 
         elif provider == "openai":
             from lelamp.service.realtime.voice_agent.openai_realtime import OpenAIRealtimeAgent
 
-            self._agent = OpenAIRealtimeAgent(config=OpenAIConfig(), tools=self._tools)
+            self._agent = OpenAIRealtimeAgent(
+                config=OpenAIConfig(instructions=instructions), tools=self._tools,
+            )
 
         else:
             logger.warning("Unknown realtime provider: %s — disabled", provider)
@@ -153,6 +164,10 @@ class RealtimeOrchestrator:
                 yield DelegateSignal()
                 return
             yield output
+
+    def save_turn(self, user_text: str, agent_text: str) -> None:
+        """Save a conversation turn to realtime memory."""
+        self._context.add_turn(user_text, agent_text)
 
     def send_function_result(self, call_id: str, output: str) -> None:
         """Send a function call result back to the model."""
