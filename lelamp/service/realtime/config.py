@@ -38,6 +38,7 @@ def _parse_turn_detection(value: str) -> OpenAITurnDetectionType | None:
 
 class OpenAIConfig(BaseModel):
     api_key: str = app_config.REALTIME_OPENAI_API_KEY
+    base_url: Optional[str] = app_config.REALTIME_OPENAI_BASE_URL or None
     model: str = app_config.REALTIME_OPENAI_MODEL
     voice: OpenAIVoice = OpenAIVoice(app_config.REALTIME_OPENAI_VOICE)
     instructions: str = ""
@@ -53,6 +54,7 @@ class OpenAIConfig(BaseModel):
 
 class GeminiConfig(BaseModel):
     api_key: str = app_config.REALTIME_GEMINI_API_KEY
+    base_url: Optional[str] = app_config.REALTIME_GEMINI_BASE_URL or None
     model: str = app_config.REALTIME_GEMINI_MODEL
     voice: GeminiVoice = GeminiVoice(app_config.REALTIME_GEMINI_VOICE)
     instructions: str = ""

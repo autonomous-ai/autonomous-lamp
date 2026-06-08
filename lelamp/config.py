@@ -334,7 +334,15 @@ REALTIME_PROVIDER: str = os.environ.get("LELAMP_REALTIME_PROVIDER", "none")  # n
 REALTIME_TURN_DETECTION: str = os.environ.get("LELAMP_REALTIME_TURN_DETECTION", "off")
 
 # --- Realtime: Gemini Live ---
-REALTIME_GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
+REALTIME_GEMINI_API_KEY: str = (
+    os.environ.get("GEMINI_API_KEY", "")
+    or os.environ.get("GOOGLE_API_KEY", "")
+    or _lamp_cfg_get("llm_api_key", "")
+)
+REALTIME_GEMINI_BASE_URL: str = os.environ.get(
+    "LELAMP_GEMINI_LIVE_BASE_URL",
+    (_lamp_cfg_get("llm_base_url", "").rstrip("/") + "/ws/gemini") if _lamp_cfg_get("llm_base_url", "") else "",
+)
 REALTIME_GEMINI_MODEL: str = os.environ.get("LELAMP_GEMINI_LIVE_MODEL", "gemini-3.1-flash-live")
 REALTIME_GEMINI_VOICE: str = os.environ.get("LELAMP_GEMINI_LIVE_VOICE", "Kore")
 REALTIME_GEMINI_SAMPLE_RATE: int = 16000
@@ -342,7 +350,14 @@ REALTIME_GEMINI_THINKING_LEVEL: str = os.environ.get("LELAMP_GEMINI_THINKING_LEV
 REALTIME_GEMINI_USE_LANGUAGE_CODES: bool = os.environ.get("LELAMP_GEMINI_USE_LANGUAGE_CODES", "false").lower() in ("1", "true", "yes")
 
 # --- Realtime: OpenAI Realtime ---
-REALTIME_OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
+REALTIME_OPENAI_API_KEY: str = (
+    os.environ.get("OPENAI_API_KEY", "")
+    or _lamp_cfg_get("llm_api_key", "")
+)
+REALTIME_OPENAI_BASE_URL: str = os.environ.get(
+    "LELAMP_OPENAI_REALTIME_BASE_URL",
+    (_lamp_cfg_get("llm_base_url", "").rstrip("/") + "/ws/openai") if _lamp_cfg_get("llm_base_url", "") else "",
+)
 REALTIME_OPENAI_MODEL: str = os.environ.get("LELAMP_OPENAI_REALTIME_MODEL", "gpt-realtime-2")
 REALTIME_OPENAI_VOICE: str = os.environ.get("LELAMP_OPENAI_REALTIME_VOICE", "alloy")
 REALTIME_OPENAI_SAMPLE_RATE: int = 24000

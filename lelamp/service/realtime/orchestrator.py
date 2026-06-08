@@ -28,6 +28,7 @@ from lelamp.service.realtime.models import (
     FunctionCallOutput,
     FunctionCallResultInput,
     OutputBase,
+    TextInput,
 )
 from lelamp.service.realtime.voice_agent.base import VoiceAgentBase
 
@@ -39,13 +40,23 @@ DELEGATE_TOOL_NAME: str = "delegate_to_main"
 DELEGATE_TOOL_DESCRIPTION: str = (
     "Call this when the user's request requires the main system — "
     "device control, music, scheduling, memory, skills, real-time facts, "
-    "or anything beyond casual conversation. Takes no arguments."
+    "or anything beyond casual conversation. "
+    "Pass a message summarizing what the user wants so the main system "
+    "can act without re-listening to the audio."
 )
 
 DELEGATE_TOOL: dict[str, Any] = {
     "name": DELEGATE_TOOL_NAME,
     "description": DELEGATE_TOOL_DESCRIPTION,
-    "parameters": {"type": "object", "properties": {}},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "message": {
+                "type": "string",
+                "description": "A short summary of the user's request to pass to the main system.",
+            },
+        },
+    },
 }
 
 
@@ -53,7 +64,7 @@ DELEGATE_TOOL: dict[str, Any] = {
 class DelegateSignal:
     """Yielded by stream_output() when the model calls delegate_to_main."""
 
-    pass
+    message: str = ""
 
 
 class RealtimeOrchestrator:
@@ -154,16 +165,33 @@ class RealtimeOrchestrator:
 
         for output in self._agent.receive(stop_on_done=True):
             if isinstance(output, FunctionCallOutput) and output.name == DELEGATE_TOOL_NAME:
-                logger.info("Model delegated to main flow")
+                # Extract message from tool call arguments
+                import json as _json
+                delegate_msg: str = ""
+                try:
+                    args: dict = _json.loads(output.arguments) if output.arguments else {}
+                    delegate_msg = args.get("message", "")
+                except (ValueError, TypeError):
+                    pass
+                logger.info("Model delegated to main flow (message=%r)", delegate_msg[:100] if delegate_msg else "")
                 self._agent.send([
                     FunctionCallResultInput(
                         call_id=output.call_id,
                         output='{"result": "delegated"}',
                     )
                 ])
-                yield DelegateSignal()
+                yield DelegateSignal(message=delegate_msg)
                 return
             yield output
+
+    def send_text(self, text: str) -> None:
+        """Send a text message to the agent as context (non-blocking).
+
+        Used to feed back results from the main system after delegation,
+        so the agent knows what happened.
+        """
+        if self._agent is not None:
+            self._agent.send([TextInput(text=text)])
 
     def save_turn(self, user_text: str, agent_text: str) -> None:
         """Save a conversation turn to realtime memory."""

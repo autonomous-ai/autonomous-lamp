@@ -55,7 +55,10 @@ class GeminiLiveAgent(VoiceAgentBase):
     ) -> None:
         super().__init__(tools=tools)
         self._config: GeminiConfig = config
-        self._client: genai.Client = genai.Client(api_key=config.api_key)
+        client_kwargs: dict = {"api_key": config.api_key}
+        if config.base_url:
+            client_kwargs["http_options"] = types.HttpOptions(base_url=config.base_url)
+        self._client: genai.Client = genai.Client(**client_kwargs)
         self._session: AsyncSession | None = None
         self._exit_stack: AsyncExitStack | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -136,7 +139,11 @@ class GeminiLiveAgent(VoiceAgentBase):
     # --- Async internals (run on private event loop) ---
 
     async def _async_connect(self) -> None:
-        logger.info("Connecting to Gemini Live API (model=%s)", self._config.model)
+        logger.info(
+            "Connecting to Gemini Live API (base_url=%s, model=%s)",
+            self._config.base_url,
+            self._config.model,
+        )
         self._exit_stack = AsyncExitStack()
         self._session = await self._exit_stack.enter_async_context(
             self._client.aio.live.connect(
@@ -179,7 +186,7 @@ class GeminiLiveAgent(VoiceAgentBase):
                     parts=[types.Part(text=input.text)],
                     role="user",
                 ),
-                turn_complete=True,
+                turn_complete=False,
             )
         elif isinstance(input, ImageInput):
             _: bool
@@ -311,14 +318,18 @@ class GeminiLiveAgent(VoiceAgentBase):
         """Submit a coroutine to the IO thread's loop and block until done."""
         if self._loop is None:
             raise RuntimeError("Event loop is None")
-        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=timeout)
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(
+            timeout=timeout
+        )
 
     @override
     def _do_connect(self) -> None:
         """Spawn IO thread with event loop, connect on it. Blocks until ready."""
         self._loop = asyncio.new_event_loop()
         self._io_thread = threading.Thread(
-            target=self._loop.run_forever, daemon=True, name="gemini-io",
+            target=self._loop.run_forever,
+            daemon=True,
+            name="gemini-io",
         )
         self._io_thread.start()
         self._submit_and_wait(self._async_connect())
@@ -343,15 +354,22 @@ class GeminiLiveAgent(VoiceAgentBase):
             if self._loop is None:
                 break
             try:
-                event: AgentInputEvent = self._send_queue.get(timeout=self._queue_poll_s)
+                event: AgentInputEvent = self._send_queue.get(
+                    timeout=self._queue_poll_s
+                )
             except queue.Empty:
                 continue
 
             try:
                 if isinstance(event, AudioCommitEvent):
-                    self._submit_and_wait(self._async_commit(), timeout=self._send_timeout_s)
+                    self._submit_and_wait(
+                        self._async_commit(), timeout=self._send_timeout_s
+                    )
                 elif isinstance(event, InputEvent):
-                    self._submit_and_wait(self._async_send_input(event.input), timeout=self._send_timeout_s)
+                    self._submit_and_wait(
+                        self._async_send_input(event.input),
+                        timeout=self._send_timeout_s,
+                    )
             except (ConnectionClosed, genai_errors.APIError) as e:
                 logger.warning("Send failed: %s — reconnecting", e)
                 self._reconnect()
@@ -368,7 +386,9 @@ class GeminiLiveAgent(VoiceAgentBase):
                 _ = self._connected.wait(timeout=self._queue_poll_s)
                 continue
             try:
-                self._submit_and_wait(self._async_receive_turn(), timeout=self._recv_timeout_s)
+                self._submit_and_wait(
+                    self._async_receive_turn(), timeout=self._recv_timeout_s
+                )
             except (ConnectionClosed, genai_errors.APIError) as e:
                 logger.warning("Recv failed: %s — reconnecting", e)
                 self._reconnect()

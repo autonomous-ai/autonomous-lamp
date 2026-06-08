@@ -46,7 +46,10 @@ class OpenAIRealtimeAgent(VoiceAgentBase):
     ) -> None:
         super().__init__(tools=tools)
         self._config: OpenAIConfig = config
-        self._client: OpenAI = OpenAI(api_key=config.api_key)
+        self._client: OpenAI = OpenAI(
+            api_key=config.api_key,
+            base_url=config.base_url,
+        )
         self._connection: RealtimeConnection | None = None
         self._speech_stopped_at: float | None = None
         self._reconnect_max_retries: int = 3
@@ -60,7 +63,11 @@ class OpenAIRealtimeAgent(VoiceAgentBase):
     # --- Sync internals ---
 
     def _sync_connect(self) -> None:
-        logger.info("Connecting to OpenAI Realtime API (model=%s)", self._config.model)
+        logger.info(
+            "Connecting to OpenAI Realtime API (base_url=%s, model=%s)",
+            self._config.base_url,
+            self._config.model,
+        )
 
         self._connection = self._client.realtime.connect(
             model=self._config.model,
