@@ -307,8 +307,8 @@ func hostOnly(addr string) string {
 
 // adminOrLoopbackAuth gates an endpoint with a hybrid policy: a strict-loopback
 // origin (no nginx proxy headers) bypasses auth entirely; everything else must
-// pass adminAuthMiddleware. Used by /api/system/factory-reset so the lelamp
-// GPIO long-press trigger can reach the endpoint with no Bearer (the device
+// pass adminAuthMiddleware. Used by /api/system/factory-reset so the on-device
+// factory-reset trigger can reach the endpoint with no Bearer (the device
 // might not even be set up yet — physical button = authority) while web calls
 // from the LAN still need admin credentials.
 func adminOrLoopbackAuth(cfg *config.Config) gin.HandlerFunc {
@@ -494,9 +494,6 @@ func (s *Server) Serve(closeFn func()) error {
 	// below — a WS reconnect that lands before i18n is wired falls back to
 	// English even when STTLanguage is "vi"/"zh-*".
 	i18n.SetConfig(s.config)
-
-	// GPIO ownership: lelamp (Python) gpio_button handles GPIO17 long-press
-	// shutdown + servo release. No Go-side button watcher.
 
 	s.handleSetUpCompleteChange(s.config.SetUpCompleted)
 	s.handleDeviceIDChange(s.config.DeviceID)
