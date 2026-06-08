@@ -769,6 +769,16 @@ server {
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
   }
 
+  location = /api/system/exec {
+    allow 127.0.0.1;
+    allow ::1;
+    deny all;
+    proxy_pass http://backend;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+  }
+
   location = /api/buddy/ws {
     proxy_pass http://backend;
     proxy_http_version 1.1;
