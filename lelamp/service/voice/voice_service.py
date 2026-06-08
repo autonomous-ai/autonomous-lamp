@@ -863,16 +863,29 @@ class VoiceService:
                     self._realtime.commit_audio()
                     logger.info("[realtime] Audio committed — streaming output")
                     text_parts: list[str] = []
-                    output_count = 0
+                    sentence_buf: str = ""
+                    first_sentence_sent: bool = False
+                    SENTENCE_ENDS = (".", "!", "?", "。", "！", "？")
 
                     for output in self._realtime.stream_output():
-                        output_count += 1
-                        logger.info("[realtime] Output #%d: %s", output_count, type(output).__name__)
                         if isinstance(output, DelegateSignal):
                             rt_delegated = True
                             break
                         if isinstance(output, RTTextOutput):
                             text_parts.append(output.text)
+                            sentence_buf += output.text
+                            # Flush complete sentences to TTS as they arrive
+                            if self._tts is not None and sentence_buf.rstrip().endswith(SENTENCE_ENDS):
+                                sentence: str = sentence_buf.strip()
+                                if sentence:
+                                    if not first_sentence_sent:
+                                        logger.info("[realtime] First sentence → speak: %r", sentence[:80])
+                                        self._tts.speak(sentence)
+                                        first_sentence_sent = True
+                                    else:
+                                        logger.info("[realtime] Next sentence → speak_queue: %r", sentence[:80])
+                                        self._tts.speak_queue(sentence)
+                                sentence_buf = ""
 
                     rt_transcript = "".join(text_parts).strip()
 
@@ -880,13 +893,19 @@ class VoiceService:
                         logger.info("[realtime] Model delegated → will forward to Lamp")
                     else:
                         rt_handled = True
+                        # Flush any remaining text that didn't end with a sentence boundary
+                        remaining: str = sentence_buf.strip()
+                        if remaining and self._tts is not None:
+                            if not first_sentence_sent:
+                                logger.info("[realtime] Final fragment → speak: %r", remaining[:80])
+                                self._tts.speak(remaining)
+                            else:
+                                logger.info("[realtime] Final fragment → speak_queue: %r", remaining[:80])
+                                self._tts.speak_queue(remaining)
                         logger.info(
-                            "[realtime] Chit-chat complete — outputs=%d transcript=%r",
-                            output_count, rt_transcript[:200] if rt_transcript else "(empty)",
+                            "[realtime] Chit-chat complete — transcript=%r",
+                            rt_transcript[:200] if rt_transcript else "(empty)",
                         )
-                        if rt_transcript and self._tts is not None:
-                            logger.info("[realtime] Speaking via TTS: %r", rt_transcript[:100])
-                            self._tts.speak(rt_transcript)
                         # Save turn to realtime memory
                         self._realtime.save_turn(
                             user_text=combined or "(audio only)",
