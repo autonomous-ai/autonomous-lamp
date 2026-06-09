@@ -327,7 +327,7 @@ SPEECH_EMOTION_AUDIO_DIR: str = os.environ.get(
 
 # --- Realtime voice agent ---
 REALTIME_ENABLED: bool = os.environ.get("LELAMP_REALTIME_ENABLED", "true").lower() in ("1", "true", "yes")
-REALTIME_PROVIDER: str = os.environ.get("LELAMP_REALTIME_PROVIDER", "none")  # none | gemini | openai
+REALTIME_PROVIDER: str = os.environ.get("LELAMP_REALTIME_PROVIDER", "gemini")  # none | gemini | openai
 # Turn detection / VAD: "server_vad" | "semantic_vad" | "off"
 # For Gemini: "off" disables automatic activity detection; any other value enables it.
 # For OpenAI: maps to turn_detection type in session config.
@@ -343,7 +343,7 @@ REALTIME_GEMINI_BASE_URL: str = os.environ.get(
     "LELAMP_GEMINI_LIVE_BASE_URL",
     (_lamp_cfg_get("llm_base_url", "").rstrip("/") + "/ws/gemini") if _lamp_cfg_get("llm_base_url", "") else "",
 )
-REALTIME_GEMINI_MODEL: str = os.environ.get("LELAMP_GEMINI_LIVE_MODEL", "gemini-3.1-flash-live")
+REALTIME_GEMINI_MODEL: str = os.environ.get("LELAMP_GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview")
 REALTIME_GEMINI_VOICE: str = os.environ.get("LELAMP_GEMINI_LIVE_VOICE", "Kore")
 REALTIME_GEMINI_SAMPLE_RATE: int = 16000
 REALTIME_GEMINI_THINKING_LEVEL: str = os.environ.get("LELAMP_GEMINI_THINKING_LEVEL", "HIGH")
