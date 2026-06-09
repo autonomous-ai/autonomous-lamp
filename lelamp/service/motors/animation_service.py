@@ -12,6 +12,16 @@ logger = logging.getLogger(__name__)
 # Default interpolation duration for move_to (seconds)
 DEFAULT_MOVE_DURATION = 2.0
 
+# Zero/hold position in raw encoder units — the physical resting pose after release.
+# wrist_pitch (-59.18°, raw 1914) exceeds calibrated range_min=2044, so move_to_raw is used.
+ZERO_RAW = {
+    "base_yaw":    2100,  #   5.22° — mid=2041.5
+    "base_pitch":  2091,  # -19.45° — mid=2312.5
+    "elbow_pitch": 2276,  #  -7.93° — mid=2366.5
+    "wrist_roll":  2070,  #   0.00° — mid=2070.0
+    "wrist_pitch": 1914,  # -59.18° — mid=2588.0
+}
+
 # Wake/resume position in raw encoder units — all 5 joints.
 # Pre-computed from calibration JSON: raw = int(deg * 4095/360 + mid), mid=(range_min+range_max)/2.
 # wrist_pitch (-68.48°, raw 1809) exceeds calibrated range_min=2044, so move_to_raw is used.

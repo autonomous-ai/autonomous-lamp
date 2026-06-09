@@ -32,7 +32,7 @@ from lelamp.presets import (
     AIM_RIGHT,
     SERVO_CMD_PLAY,
 )
-from lelamp.service.motors.animation_service import RESUME_STARTUP_RAW, STARTUP_MOVE_DURATION
+from lelamp.service.motors.animation_service import RESUME_STARTUP_RAW, STARTUP_MOVE_DURATION, ZERO_RAW
 
 router = APIRouter(tags=["Servo"])
 
@@ -301,13 +301,15 @@ def zero_servos():
     state.animation_service._running.clear()
     if state.animation_service._event_thread and state.animation_service._event_thread.is_alive():
         state.animation_service._event_thread.join(timeout=3.0)
-    zero_pos = {f"{m}.pos": 0.0 for m in state.animation_service.robot.bus.motors}
-    zero_pos["elbow_pitch.pos"] = 0.0
     try:
-        state.animation_service.move_to(zero_pos, duration=2.0)
+        state.animation_service._configure_servos_raw()
+    except Exception as e:
+        state.logger.warning("zero: raw configure failed: %s", e)
+    try:
+        state.animation_service.move_to_raw(ZERO_RAW, duration=2.0)
     except Exception as e:
         state.logger.warning(f"Could not move to zero: {e}")
-    state.animation_service._current_state = {k: 0.0 for k in zero_pos}
+    state.animation_service._sync_state_from_hardware()
     return {"status": "ok"}
 
 
