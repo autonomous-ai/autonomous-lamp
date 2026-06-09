@@ -326,7 +326,7 @@ SPEECH_EMOTION_AUDIO_DIR: str = os.environ.get(
 )
 
 # --- Realtime voice agent ---
-REALTIME_ENABLED: bool = os.environ.get("LELAMP_REALTIME_ENABLED", "false").lower() in ("1", "true", "yes")
+REALTIME_ENABLED: bool = os.environ.get("LELAMP_REALTIME_ENABLED", "true").lower() in ("1", "true", "yes")
 REALTIME_PROVIDER: str = os.environ.get("LELAMP_REALTIME_PROVIDER", "none")  # none | gemini | openai
 # Turn detection / VAD: "server_vad" | "semantic_vad" | "off"
 # For Gemini: "off" disables automatic activity detection; any other value enables it.
