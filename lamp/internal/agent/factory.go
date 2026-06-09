@@ -21,11 +21,12 @@ import (
 func ProvideGateway(cfg *config.Config, bus *monitor.Bus, sled *statusled.Service) domain.AgentGateway {
 	switch cfg.AgentRuntime {
 	case "hermes":
+		h := cfg.GetHermes()
 		logBackendBanner("HERMES", map[string]string{
-			"base_url":     cfg.GetHermesBaseURL(),
-			"conversation": cfg.GetHermesConversation(),
-			"model":        cfg.GetHermesModel(),
-			"api_key_set":  boolStr(cfg.HermesAPIKey != ""),
+			"base_url":     h.BaseURL,
+			"conversation": h.Conversation,
+			"model":        h.Model,
+			"api_key_set":  boolStr(h.APIKey != ""),
 		})
 		return hermes.ProvideService(cfg, bus, sled)
 	default:

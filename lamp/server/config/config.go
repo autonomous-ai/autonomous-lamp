@@ -87,10 +87,7 @@ type Config struct {
 	// Hermes backend (used when AgentRuntime == "hermes"). Hermes runs as a local
 	// HTTP+SSE API server (OpenAI Responses API style) on the Pi; Lumi acts as a
 	// per-request client. See hermes.md for the full design.
-	HermesBaseURL      string `json:"hermes_base_url,omitempty" yaml:"hermesBaseURL"`
-	HermesAPIKey       string `json:"hermes_api_key,omitempty" yaml:"hermesAPIKey"`
-	HermesConversation string `json:"hermes_conversation,omitempty" yaml:"hermesConversation"`
-	HermesModel        string `json:"hermes_model,omitempty" yaml:"hermesModel"`
+	Hermes HermesConfig `json:"hermes,omitempty" yaml:"hermes"`
 
 	NetworkSSID     string `json:"network_ssid" yaml:"networkSSID" validate:"required"`
 	NetworkPassword string `json:"network_password" yaml:"networkPassword" validate:"required"`
@@ -360,30 +357,29 @@ func (c *Config) GetNotifyChannel() chan bool {
 	return c.notify
 }
 
-// GetHermesBaseURL returns the configured Hermes endpoint, defaulting to the
-// canonical local socket.
-func (c *Config) GetHermesBaseURL() string {
-	if c.HermesBaseURL != "" {
-		return c.HermesBaseURL
-	}
-	return "http://127.0.0.1:8642"
+// HermesConfig groups every setting consumed by the Hermes backend. Lives as a
+// nested object under `"hermes"` in config.json so the keys stay scoped.
+type HermesConfig struct {
+	BaseURL      string `json:"base_url,omitempty" yaml:"baseURL"`
+	APIKey       string `json:"api_key,omitempty" yaml:"apiKey"`
+	Conversation string `json:"conversation,omitempty" yaml:"conversation"`
+	Model        string `json:"model,omitempty" yaml:"model"`
 }
 
-// GetHermesConversation returns the named conversation Lumi posts every turn
-// into, defaulting to "lumi-main".
-func (c *Config) GetHermesConversation() string {
-	if c.HermesConversation != "" {
-		return c.HermesConversation
+// GetHermes returns the Hermes configuration with defaults applied for any
+// empty field. APIKey has no default — empty means "skip Bearer header".
+func (c *Config) GetHermes() HermesConfig {
+	h := c.Hermes
+	if h.BaseURL == "" {
+		h.BaseURL = "http://127.0.0.1:8642"
 	}
-	return "lumi-main"
-}
-
-// GetHermesModel returns the Hermes model name (advertised by /v1/models).
-func (c *Config) GetHermesModel() string {
-	if c.HermesModel != "" {
-		return c.HermesModel
+	if h.Conversation == "" {
+		h.Conversation = "lumi-main"
 	}
-	return "hermes-agent"
+	if h.Model == "" {
+		h.Model = "hermes-agent"
+	}
+	return h
 }
 
 func ProvideMQTTConfig(c *Config) mqtt.Config {

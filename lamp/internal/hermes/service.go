@@ -3,7 +3,7 @@
 // the full design — protocol mapping, session strategy, and the runtime
 // boundaries with OpenClaw.
 //
-// Hermes is assumed to be running locally on the Pi at HermesBaseURL with
+// Hermes is assumed to be running locally on the Pi at Hermes.BaseURL with
 // all skills already provisioned. Lumi only acts as a per-request client and
 // translates SSE events into the same domain.WSEvent shape that the OpenClaw
 // handler at server/agent/delivery/http/handler_events.go consumes — so the
