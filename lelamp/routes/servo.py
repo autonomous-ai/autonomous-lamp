@@ -205,8 +205,8 @@ def resume_servos():
     # Sync actual arm positions before the event loop starts so _current_state
     # reflects hardware, not the stale rest_pos from before torque was cut.
     state.animation_service._sync_state_from_hardware()
-    # Use 2x interpolation duration for resume so the arm eases in at half speed.
-    state.animation_service._resume_duration = state.animation_service.duration * 2.0
+    # Resume at ~30% slower than the 2x base: 2.0/0.7 ≈ 2.86x normal duration (~14.3s).
+    state.animation_service._resume_duration = state.animation_service.duration * 2.0 / 0.7
     if not state.animation_service._running.is_set():
         # Set running and queue the event BEFORE starting the thread so the
         # event is the first thing the loop processes (no race with _continue_playback).
