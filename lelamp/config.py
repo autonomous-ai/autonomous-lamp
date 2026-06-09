@@ -369,8 +369,8 @@ _rt_workspace: str = REALTIME_WORKSPACE_DIR.rstrip("/")
 REALTIME_MEMORY_PATH: str = os.environ.get("LELAMP_REALTIME_MEMORY_PATH", f"{_rt_workspace}/realtime/memory.jsonl")
 REALTIME_MAX_MEMORY_ENTRIES: int = int(os.environ.get("LELAMP_REALTIME_MAX_MEMORY_ENTRIES", "1000"))
 REALTIME_MEMORY_TRIM_KEEP: int = int(os.environ.get("LELAMP_REALTIME_MEMORY_TRIM_KEEP", "500"))
-REALTIME_LAMP_MEMORY_COUNT: int = int(os.environ.get("LELAMP_REALTIME_LAMP_MEMORY_COUNT", "500"))
-REALTIME_MEMORY_COUNT: int = int(os.environ.get("LELAMP_REALTIME_MEMORY_COUNT", "500"))
+REALTIME_LAMP_MEMORY_COUNT: int = int(os.environ.get("LELAMP_REALTIME_LAMP_MEMORY_COUNT", "100"))
+REALTIME_MEMORY_COUNT: int = int(os.environ.get("LELAMP_REALTIME_MEMORY_COUNT", "100"))
 
 # --- Realtime: Summarizer (Anthropic Messages API) ---
 REALTIME_SUMMARIZER_ENABLED: bool = os.environ.get("LELAMP_REALTIME_SUMMARIZER_ENABLED", "true").lower() in ("1", "true", "yes")
