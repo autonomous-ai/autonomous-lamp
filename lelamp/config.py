@@ -365,8 +365,17 @@ REALTIME_OPENAI_REASONING_EFFORT: str = os.environ.get("LELAMP_OPENAI_REASONING_
 
 # --- Realtime: Context manager ---
 REALTIME_WORKSPACE_DIR: str = os.environ.get("LELAMP_OPENCLAW_WORKSPACE_DIR", "/root/.openclaw/workspace")
-REALTIME_MEMORY_PATH: str = os.environ.get("LELAMP_REALTIME_MEMORY_PATH", "/tmp/realtime_memory.jsonl")
+_rt_workspace: str = REALTIME_WORKSPACE_DIR.rstrip("/")
+REALTIME_MEMORY_PATH: str = os.environ.get("LELAMP_REALTIME_MEMORY_PATH", f"{_rt_workspace}/realtime/memory.jsonl")
 REALTIME_MAX_MEMORY_ENTRIES: int = int(os.environ.get("LELAMP_REALTIME_MAX_MEMORY_ENTRIES", "1000"))
 REALTIME_MEMORY_TRIM_KEEP: int = int(os.environ.get("LELAMP_REALTIME_MEMORY_TRIM_KEEP", "500"))
-REALTIME_LAMP_MEMORY_COUNT: int = int(os.environ.get("LELAMP_REALTIME_LAMP_MEMORY_COUNT", "20"))
-REALTIME_MEMORY_COUNT: int = int(os.environ.get("LELAMP_REALTIME_MEMORY_COUNT", "20"))
+REALTIME_LAMP_MEMORY_COUNT: int = int(os.environ.get("LELAMP_REALTIME_LAMP_MEMORY_COUNT", "500"))
+REALTIME_MEMORY_COUNT: int = int(os.environ.get("LELAMP_REALTIME_MEMORY_COUNT", "500"))
+
+# --- Realtime: Summarizer (Anthropic Messages API) ---
+REALTIME_SUMMARIZER_ENABLED: bool = os.environ.get("LELAMP_REALTIME_SUMMARIZER_ENABLED", "true").lower() in ("1", "true", "yes")
+REALTIME_SUMMARIZER_API_KEY: str = os.environ.get("LELAMP_REALTIME_SUMMARIZER_API_KEY", "") or _lamp_cfg_get("llm_api_key", "")
+# Anthropic SDK appends /v1/messages, so strip trailing /v1 from llm_base_url
+_summarizer_base: str = os.environ.get("LELAMP_REALTIME_SUMMARIZER_BASE_URL", "") or _lamp_cfg_get("llm_base_url", "")
+REALTIME_SUMMARIZER_BASE_URL: str = _summarizer_base.rstrip("/").removesuffix("/v1") if _summarizer_base else ""
+REALTIME_SUMMARIZER_MODEL: str = os.environ.get("LELAMP_REALTIME_SUMMARIZER_MODEL", "claude-haiku-4-5-20251001")

@@ -24,6 +24,7 @@ import numpy.typing as npt
 import lelamp.config as config
 from lelamp.service.realtime.config import GeminiConfig, OpenAIConfig, _load_language
 from lelamp.service.realtime.context_manager import RealtimeContextManager
+from lelamp.service.realtime.summarizer import RealtimeSummarizer
 from lelamp.service.realtime.models import (
     FunctionCallOutput,
     FunctionCallResultInput,
@@ -81,8 +82,16 @@ class RealtimeOrchestrator:
     ) -> None:
         self._tools: list[dict[str, Any]] = [DELEGATE_TOOL] + (extra_tools or [])
         self._agent: VoiceAgentBase | None = None
+        summarizer: RealtimeSummarizer | None = None
+        if config.REALTIME_SUMMARIZER_ENABLED:
+            try:
+                summarizer = RealtimeSummarizer()
+                logger.info("Realtime summarizer enabled (model=%s)", config.REALTIME_SUMMARIZER_MODEL)
+            except Exception as e:
+                logger.warning("Failed to create summarizer: %s", e)
         self._context: RealtimeContextManager = RealtimeContextManager(
             language=_load_language() or "English",
+            summarizer=summarizer,
         )
 
     @property
