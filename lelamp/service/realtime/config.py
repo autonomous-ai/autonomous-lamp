@@ -38,13 +38,13 @@ def _parse_turn_detection(value: str) -> OpenAITurnDetectionType | None:
 
 class OpenAIConfig(BaseModel):
     api_key: str = app_config.REALTIME_OPENAI_API_KEY
-    base_url: Optional[str] = app_config.REALTIME_OPENAI_BASE_URL or None
+    base_url: str | None = app_config.REALTIME_OPENAI_BASE_URL or None
     model: str = app_config.REALTIME_OPENAI_MODEL
     voice: OpenAIVoice = OpenAIVoice(app_config.REALTIME_OPENAI_VOICE)
     instructions: str = ""
     sample_rate: int = app_config.REALTIME_OPENAI_SAMPLE_RATE
-    language: Optional[str] = _load_language()
-    turn_detection_type: Optional[OpenAITurnDetectionType] = _parse_turn_detection(
+    language: str | None = _load_language()
+    turn_detection_type: OpenAITurnDetectionType | None = _parse_turn_detection(
         app_config.REALTIME_TURN_DETECTION
     )
     reasoning_effort: OpenAIReasoningEffort = OpenAIReasoningEffort(app_config.REALTIME_OPENAI_REASONING_EFFORT)
@@ -54,12 +54,12 @@ class OpenAIConfig(BaseModel):
 
 class GeminiConfig(BaseModel):
     api_key: str = app_config.REALTIME_GEMINI_API_KEY
-    base_url: Optional[str] = app_config.REALTIME_GEMINI_BASE_URL or None
+    base_url: str | None = app_config.REALTIME_GEMINI_BASE_URL or None
     model: str = app_config.REALTIME_GEMINI_MODEL
     voice: GeminiVoice = GeminiVoice(app_config.REALTIME_GEMINI_VOICE)
     instructions: str = ""
     sample_rate: int = app_config.REALTIME_GEMINI_SAMPLE_RATE
-    language: Optional[str] = _load_language()
+    language: str | None = _load_language()
     use_language_codes: bool = app_config.REALTIME_GEMINI_USE_LANGUAGE_CODES
     thinking_level: GeminiThinkingLevel = GeminiThinkingLevel(app_config.REALTIME_GEMINI_THINKING_LEVEL)
     vad_enabled: bool = (

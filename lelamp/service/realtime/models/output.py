@@ -1,7 +1,5 @@
 """Output data models streamed from the realtime voice agent."""
 
-from typing import Optional
-
 import numpy as np
 import numpy.typing as npt
 from pydantic import BaseModel, ConfigDict
@@ -22,7 +20,7 @@ class TextOutput(OutputBase):
 class AudioOutput(OutputBase):
     type: OutputTypeEnum = OutputTypeEnum.AUDIO
     audio: npt.NDArray[np.float32]
-    transcript: Optional[str] = None
+    transcript: str | None = None
 
 
 class FunctionCallOutput(OutputBase):

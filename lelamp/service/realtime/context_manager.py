@@ -5,7 +5,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import lelamp.config as app_config
 from lelamp.service.realtime.constants import RESOURCES_DIR
@@ -27,7 +27,7 @@ class RealtimeContextManager:
         self,
         workspace_dir: str = app_config.REALTIME_WORKSPACE_DIR,
         realtime_memory_path: str = app_config.REALTIME_MEMORY_PATH,
-        language: Optional[str] = None,
+        language: str | None = None,
         max_memory_entries: int = app_config.REALTIME_MAX_MEMORY_ENTRIES,
         trim_keep: int = app_config.REALTIME_MEMORY_TRIM_KEEP,
         lamp_memory_count: int = app_config.REALTIME_LAMP_MEMORY_COUNT,
