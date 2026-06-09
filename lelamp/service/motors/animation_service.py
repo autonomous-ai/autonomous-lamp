@@ -62,6 +62,7 @@ class AnimationService:
         self._current_frame_index: int = 0
         self._current_actions: List[Dict[str, float]] = []
         self._interpolation_frames: int = 0
+        self._interpolation_total_frames: int = 0  # denominator for progress; must match _interpolation_frames initial value
         self._interpolation_target: Optional[Dict[str, float]] = None
 
         # Music groove: loop while music is playing
@@ -283,7 +284,9 @@ class AnimationService:
         if self._current_state is not None:
             effective_duration = self._resume_duration if self._resume_duration is not None else self.duration
             self._resume_duration = None
-            self._interpolation_frames = int(effective_duration * self.fps)
+            total = int(effective_duration * self.fps)
+            self._interpolation_frames = total
+            self._interpolation_total_frames = total
             self._interpolation_target = actions[0]
         else:
             self._interpolation_frames = 0
@@ -323,8 +326,10 @@ class AnimationService:
         try:
             # Handle interpolation to first frame
             if self._interpolation_frames > 0 and self._interpolation_target is not None:
-                # Calculate interpolation progress
-                progress = 1.0 - (self._interpolation_frames / (self.duration * self.fps))
+                # Calculate interpolation progress — use stored total so the denominator
+                # matches the initial _interpolation_frames value, not always self.duration.
+                denom = self._interpolation_total_frames if self._interpolation_total_frames > 0 else int(self.duration * self.fps)
+                progress = 1.0 - (self._interpolation_frames / denom)
                 progress = max(0.0, min(1.0, progress))
                 
                 # Interpolate between current state and target
@@ -395,7 +400,9 @@ class AnimationService:
                         self._current_actions = next_actions
                         self._current_frame_index = 0
                         if self._current_state is not None:
-                            self._interpolation_frames = int(self.duration * self.fps)
+                            total = int(self.duration * self.fps)
+                            self._interpolation_frames = total
+                            self._interpolation_total_frames = total
                             self._interpolation_target = next_actions[0]
                 elif self._hold_mode:
                     # Hold mode active while idle finished — hold pose, reduce FPS

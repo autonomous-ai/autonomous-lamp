@@ -202,19 +202,23 @@ def resume_servos():
         raise HTTPException(503, "Servo not available")
     state.animation_service._zero_mode = False
     state.animation_service._hold_mode = False
+    # Sync actual arm positions before the event loop starts so _current_state
+    # reflects hardware, not the stale rest_pos from before torque was cut.
+    state.animation_service._sync_state_from_hardware()
+    # Use 2x interpolation duration for resume so the arm eases in at half speed.
+    state.animation_service._resume_duration = state.animation_service.duration * 2.0
     if not state.animation_service._running.is_set():
+        # Set running and queue the event BEFORE starting the thread so the
+        # event is the first thing the loop processes (no race with _continue_playback).
         state.animation_service._running.set()
+        state.animation_service.dispatch(SERVO_CMD_PLAY, state.animation_service.idle_recording)
         state.animation_service._event_thread = threading.Thread(
             target=state.animation_service._event_loop, daemon=True
         )
         state.animation_service._event_thread.start()
         state.logger.info("Animation event loop restarted via /servo/resume")
-    # Sync actual arm position (arm may have been moved while torque was off after release/zero).
-    # Without this, _current_state is stale and the first interpolation step snaps the arm.
-    state.animation_service._sync_state_from_hardware()
-    # Use 2x interpolation duration for resume so the arm eases in at half speed.
-    state.animation_service._resume_duration = state.animation_service.duration * 2.0
-    state.animation_service.dispatch(SERVO_CMD_PLAY, state.animation_service.idle_recording)
+    else:
+        state.animation_service.dispatch(SERVO_CMD_PLAY, state.animation_service.idle_recording)
     state.logger.info("Servo resumed from zero-hold mode")
     return {"status": "ok"}
 
