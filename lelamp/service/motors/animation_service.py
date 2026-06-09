@@ -17,7 +17,7 @@ DEFAULT_MOVE_DURATION = 2.0
 ZERO_RAW = {
     "base_yaw":    2100,  #   5.22° — mid=2041.5
     "base_pitch":  2082,  # -20.25° — mid=2312.5
-    "elbow_pitch": 2276,  #  -7.93° — mid=2366.5
+    "elbow_pitch": 2019,  # -30.54° — mid=2366.5
     "wrist_roll":  2070,  #   0.00° — mid=2070.0
     "wrist_pitch": 1914,  # -59.18° — mid=2588.0
 }
