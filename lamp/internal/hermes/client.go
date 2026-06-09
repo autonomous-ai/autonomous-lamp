@@ -70,16 +70,15 @@ func (s *Service) postStream(ctx context.Context, body streamRequest, dispatch f
 		return streamResult{}, fmt.Errorf("marshal request: %w", err)
 	}
 
-	h := s.config.GetHermes()
-	url := strings.TrimRight(h.BaseURL, "/") + "/v1/responses"
+	url := strings.TrimRight(BaseURL, "/") + "/v1/responses"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return streamResult{}, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
-	if h.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+h.APIKey)
+	if APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+APIKey)
 	}
 
 	resp, err := s.httpClient.Do(req)

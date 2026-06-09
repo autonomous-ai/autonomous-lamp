@@ -84,11 +84,6 @@ type Config struct {
 
 	OpenclawConfigDir string `json:"openclaw_config_dir" yaml:"openclawConfigDir"`
 
-	// Hermes backend (used when AgentRuntime == "hermes"). Hermes runs as a local
-	// HTTP+SSE API server (OpenAI Responses API style) on the Pi; Lumi acts as a
-	// per-request client. See hermes.md for the full design.
-	Hermes HermesConfig `json:"hermes,omitempty" yaml:"hermes"`
-
 	NetworkSSID     string `json:"network_ssid" yaml:"networkSSID" validate:"required"`
 	NetworkPassword string `json:"network_password" yaml:"networkPassword" validate:"required"`
 
@@ -355,31 +350,6 @@ func (c *Config) GuardModeEnabled() bool {
 
 func (c *Config) GetNotifyChannel() chan bool {
 	return c.notify
-}
-
-// HermesConfig groups every setting consumed by the Hermes backend. Lives as a
-// nested object under `"hermes"` in config.json so the keys stay scoped.
-type HermesConfig struct {
-	BaseURL      string `json:"base_url,omitempty" yaml:"baseURL"`
-	APIKey       string `json:"api_key,omitempty" yaml:"apiKey"`
-	Conversation string `json:"conversation,omitempty" yaml:"conversation"`
-	Model        string `json:"model,omitempty" yaml:"model"`
-}
-
-// GetHermes returns the Hermes configuration with defaults applied for any
-// empty field. APIKey has no default — empty means "skip Bearer header".
-func (c *Config) GetHermes() HermesConfig {
-	h := c.Hermes
-	if h.BaseURL == "" {
-		h.BaseURL = "http://127.0.0.1:8642"
-	}
-	if h.Conversation == "" {
-		h.Conversation = "lumi-main"
-	}
-	if h.Model == "" {
-		h.Model = "hermes-agent"
-	}
-	return h
 }
 
 func ProvideMQTTConfig(c *Config) mqtt.Config {

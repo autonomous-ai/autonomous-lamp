@@ -56,8 +56,7 @@ func (s *Service) runHealthLoop(ctx context.Context) {
 // is fetched on transition to ready=true so we can capture uptime_s if Hermes
 // publishes it.
 func (s *Service) probeHealth(ctx context.Context) {
-	h := s.config.GetHermes()
-	url := strings.TrimRight(h.BaseURL, "/") + "/health"
+	url := strings.TrimRight(BaseURL, "/") + "/health"
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -66,8 +65,8 @@ func (s *Service) probeHealth(ctx context.Context) {
 		s.transitionReady(false)
 		return
 	}
-	if h.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+h.APIKey)
+	if APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+APIKey)
 	}
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -97,12 +96,11 @@ func (s *Service) transitionReady(now bool) {
 	if now {
 		s.connectedAt.Store(time.Now().Unix())
 		flow.Log("ws_ready", map[string]any{"backend": "hermes"})
-		h := s.config.GetHermes()
 		slog.Info("Hermes ready",
 			"component", "hermes",
-			"base_url", h.BaseURL,
-			"conversation", h.Conversation,
-			"model", h.Model)
+			"base_url", BaseURL,
+			"conversation", Conversation,
+			"model", Model)
 		if s.statusLED != nil && s.config.SetUpCompleted {
 			s.statusLED.Clear(statusled.StateAgentDown)
 		}
@@ -120,7 +118,7 @@ func (s *Service) transitionReady(now bool) {
 	} else {
 		s.connectedAt.Store(0)
 		flow.Log("ws_down", map[string]any{"backend": "hermes"})
-		slog.Warn("Hermes unreachable", "component", "hermes", "base_url", s.config.GetHermes().BaseURL)
+		slog.Warn("Hermes unreachable", "component", "hermes", "base_url", BaseURL)
 		if s.statusLED != nil && s.config.SetUpCompleted {
 			s.statusLED.Set(statusled.StateAgentDown)
 		}
@@ -133,14 +131,13 @@ func (s *Service) maybeFetchUptime(ctx context.Context) {
 	if s.agentStartedAt.Load() > 0 {
 		return // already captured
 	}
-	h := s.config.GetHermes()
-	url := strings.TrimRight(h.BaseURL, "/") + "/health/detailed"
+	url := strings.TrimRight(BaseURL, "/") + "/health/detailed"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return
 	}
-	if h.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+h.APIKey)
+	if APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+APIKey)
 	}
 	resp, err := s.httpClient.Do(req)
 	if err != nil {

@@ -102,10 +102,9 @@ func (s *Service) sendChat(message string, imageBase64 string, fixedReqID string
 		"message": previewMsg,
 	}, idempotencyKey)
 
-	h := s.config.GetHermes()
 	body := streamRequest{
-		Model:        h.Model,
-		Conversation: h.Conversation,
+		Model:        Model,
+		Conversation: Conversation,
 		Stream:       true,
 	}
 	hasImage := imageBase64 != ""
