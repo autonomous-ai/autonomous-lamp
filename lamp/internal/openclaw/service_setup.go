@@ -41,14 +41,6 @@ var defaultModels = []domain.LLMModel{
 	},
 }
 
-// listModelsFromAPI returns the hardcoded default models list.
-func (s *Service) listModelsFromAPI(apiBaseURL string) (*domain.LLMModelsListResponse, error) {
-	return &domain.LLMModelsListResponse{
-		Count:  len(defaultModels),
-		Models: defaultModels,
-	}, nil
-}
-
 // SetupAgent writes openclaw.json from the setup request and restarts the gateway.
 func (s *Service) SetupAgent(data domain.SetupRequest) error {
 	slog.Debug("checking openclaw in PATH", "component", "openclaw")
@@ -59,10 +51,6 @@ func (s *Service) SetupAgent(data domain.SetupRequest) error {
 
 	llmAPIKey := data.LLMAPIKey
 	llmBaseURL := data.LLMBaseURL
-	llmModel := data.LLMModel
-	if llmModel == "" {
-		llmModel = s.config.LLMModel
-	}
 	channel := data.EffectiveChannel()
 
 	configPath := filepath.Join(s.config.OpenclawConfigDir, "openclaw.json")
@@ -84,23 +72,39 @@ func (s *Service) SetupAgent(data domain.SetupRequest) error {
 		slog.Debug("no existing config, starting fresh", "component", "openclaw")
 	}
 
-	slog.Debug("listing models from API", "component", "openclaw", "baseURL", llmBaseURL)
-	modelsResp, err := s.listModelsFromAPI(llmBaseURL)
+	// Fetch the live model catalog. On any failure fall back to the hardcoded
+	// defaultModels so setup still completes when campaign-api is unreachable.
+	slog.Debug("fetching models from API", "component", "openclaw")
+	modelsResp, err := FetchModelsFromAPI()
+	usedFallback := false
 	if err != nil {
-		return fmt.Errorf("list llm models from api: %w", err)
+		slog.Warn("setup: model API fetch failed, using hardcoded fallback", "component", "openclaw", "err", err)
+		modelsResp = &domain.LLMModelsListResponse{Count: len(defaultModels), Models: defaultModels}
+		usedFallback = true
 	}
-	slog.Debug("got models from API", "component", "openclaw", "count", len(modelsResp.Models))
-
 	if len(modelsResp.Models) == 0 {
 		return fmt.Errorf("no llm models found")
 	}
+	slog.Debug("got models", "component", "openclaw", "count", len(modelsResp.Models), "fallback", usedFallback)
 
-	slog.Debug("resolving config model in list", "component", "openclaw", "model", llmModel)
-	defaultModel, err := findModelByLLMModel(modelsResp.Models, llmModel)
-	if err != nil {
-		return err
+	// Primary precedence: fetch OK → upstream default_model; fallback (API down)
+	// → the user's selection already persisted in config.LLMModel (set by
+	// device.Service.Setup before this call); else first in the catalog.
+	wantKey := strings.TrimSpace(modelsResp.DefaultModel)
+	if usedFallback {
+		wantKey = strings.TrimSpace(s.config.LLMModel)
 	}
-	slog.Debug("selected default model", "component", "openclaw", "key", defaultModel.Key, "name", defaultModel.Name)
+	if wantKey == "" {
+		wantKey = modelsResp.Models[0].Key
+	}
+	defaultModel, err := findModelByLLMModel(modelsResp.Models, wantKey)
+	if err != nil {
+		// Requested key not in the catalog — fall back to the first model so
+		// setup never hard-fails on a stale/unknown selection.
+		slog.Warn("setup: requested model not in catalog, using first", "component", "openclaw", "want", wantKey)
+		defaultModel = modelsResp.Models[0]
+	}
+	slog.Debug("selected default model", "component", "openclaw", "key", defaultModel.Key)
 
 	slog.Debug("building models.providers.autonomous", "component", "openclaw")
 	modelsMap := ensureMap(configData, "models")
@@ -114,8 +118,8 @@ func (s *Service) SetupAgent(data domain.SetupRequest) error {
 		modelsEntries = append(modelsEntries, openclawModelToProviderEntry(m))
 	}
 	providersMap[customProviderName] = map[string]any{
-		"baseUrl": withOpenAIV1(llmBaseURL),
-		"api":     defaultModel.OpenClawAPIType(),
+		"baseUrl": llmBaseURL,
+		"api":     resolveAutonomousAPI(modelsResp.API),
 		"apiKey":  llmAPIKey,
 		"models":  modelsEntries,
 	}
@@ -139,8 +143,8 @@ func (s *Service) SetupAgent(data domain.SetupRequest) error {
 	agentModelsMap := ensureMap(defaultsMap, "models")
 	for _, m := range modelsResp.Models {
 		// Use prefixed key "{provider}/{key}" so the on-disk shape matches what
-		// the periodic model sync (mergeAgentModels) writes — avoids a one-time
-		// migrate+restart on the first sync tick after setup.
+		// the periodic model sync (overwriteAgentAutonomousModels) writes —
+		// avoids a one-time migrate+restart on the first sync tick after setup.
 		agentModelsMap[agentModelKey(m)] = map[string]any{
 			"params": map[string]any{
 				"cacheRetention": "short",
@@ -148,9 +152,16 @@ func (s *Service) SetupAgent(data domain.SetupRequest) error {
 		}
 	}
 	defaultsMap["model"] = map[string]any{
-		"primary": fmt.Sprintf("%s/%s", customProviderName, defaultModel.Name),
+		"primary": fmt.Sprintf("%s/%s", customProviderName, defaultModel.Key),
 	}
 	defaultsMap["models"] = agentModelsMap
+	// Seed the default image/vision model from upstream when published. Gated by
+	// presence only — fresh setup always seeds it on the autonomous provider.
+	if img := strings.TrimSpace(modelsResp.DefaultImageModel); img != "" {
+		defaultsMap["imageModel"] = map[string]any{
+			"primary": fmt.Sprintf("%s/%s", customProviderName, img),
+		}
+	}
 	agentsMap["defaults"] = defaultsMap
 	configData["agents"] = agentsMap
 
@@ -312,6 +323,18 @@ func (s *Service) SetupAgent(data domain.SetupRequest) error {
 	}
 	slog.Info("wrote openclaw config", "component", "openclaw", "path", configPath)
 
+	// On a successful fetch, update config.LLMModel to the resolved upstream
+	// default_model and record the catalog version. On fallback (API down) leave
+	// config.LLMModel as-is — it already holds the user's selection set by
+	// device.Service.Setup. The shared *config.Config is persisted by
+	// device.Service.Setup's config.Save() after this returns.
+	if !usedFallback {
+		s.config.LLMModel = defaultModel.Key
+		if modelsResp.Version > 0 {
+			s.config.DefaultModelVersion = modelsResp.Version
+		}
+	}
+
 	slog.Debug("restarting openclaw gateway", "component", "openclaw")
 	if err := restartOpenclawGateway(); err != nil {
 		return err
@@ -355,15 +378,34 @@ func (s *Service) AddChannel(ctx context.Context, data domain.AddChannelRequest)
 	case domain.ChannelSlack:
 		slackMap := ensureMap(channelsMap, domain.ChannelSlack)
 		slackMap["enabled"] = true
-		slackMap["mode"] = "socket"
 		slackMap["botToken"] = data.SlackBotToken
-		slackMap["appToken"] = data.SlackAppToken
 		if data.SlackUserID != "" {
 			slackMap["dmPolicy"] = "allowlist"
 			slackMap["allowFrom"] = mergeStringList(slackMap["allowFrom"], data.SlackUserID)
 		} else {
 			slackMap["dmPolicy"] = "open"
 			slackMap["allowFrom"] = mergeStringList(slackMap["allowFrom"], "*")
+		}
+		// Mode-specific block. Default (empty / "socket") preserves pre-existing
+		// behaviour so installs without slack_mode set stay byte-identical.
+		// HTTP mode is the message-loss-tolerant path: a public proxy forwards
+		// Slack events over MQTT to this device's slack_event handler, which
+		// POSTs them to the local gateway's webhookPath — so the gateway needs
+		// the signing secret (to re-verify) and no Slack WebSocket / appToken.
+		if data.EffectiveSlackMode() == "http" {
+			slackMap["mode"] = "http"
+			slackMap["signingSecret"] = data.SlackSigningSecret
+			webhookPath := data.SlackWebhookPath
+			if webhookPath == "" {
+				webhookPath = "/slack/events"
+			}
+			slackMap["webhookPath"] = webhookPath
+			delete(slackMap, "appToken")
+		} else {
+			slackMap["mode"] = "socket"
+			slackMap["appToken"] = data.SlackAppToken
+			delete(slackMap, "signingSecret")
+			delete(slackMap, "webhookPath")
 		}
 		channelsMap[domain.ChannelSlack] = slackMap
 		slackEntryMap := ensureMap(entriesMap, domain.ChannelSlack)
@@ -529,10 +571,14 @@ func (s *Service) RefreshModelsConfig() error {
 	// here briefly) — consistent with syncPrimaryFromFile's order.
 	currentModel := s.config.LLMModelKey()
 
-	// Patch models.providers.autonomous.models[*].reasoning
+	// Patch models.providers.autonomous — baseUrl + per-model reasoning.
+	currentBaseURL := s.config.LLMBaseURL
 	if modelsMap, ok := configData["models"].(map[string]any); ok {
 		if providersMap, ok := modelsMap["providers"].(map[string]any); ok {
 			if providerEntry, ok := providersMap[customProviderName].(map[string]any); ok {
+				if currentBaseURL != "" {
+					providerEntry["baseUrl"] = currentBaseURL
+				}
 				if modelsList, ok := providerEntry["models"].([]any); ok {
 					for _, entry := range modelsList {
 						if m, ok := entry.(map[string]any); ok {
@@ -602,17 +648,6 @@ func (s *Service) RestartAgent() error {
 	}
 	slog.Info("restart completed", "component", "openclaw")
 	return nil
-}
-
-// withOpenAIV1 appends /v1 to autonomous API base URLs that are missing it.
-// Only applies to autonomous.ai URLs ending with /ai (e.g. …/api/v1/ai).
-// External providers are left untouched.
-func withOpenAIV1(base string) string {
-	base = strings.TrimSuffix(strings.TrimSpace(base), "/")
-	if strings.Contains(base, "campaign-api.autonomous.ai") && strings.HasSuffix(base, "/ai") {
-		return base + "/v1"
-	}
-	return base
 }
 
 func findModelByLLMModel(models []domain.LLMModel, llmModel string) (domain.LLMModel, error) {

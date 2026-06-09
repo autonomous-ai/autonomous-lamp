@@ -181,7 +181,7 @@ func (h *SensingHandler) PostEvent(c *gin.Context) {
 
 	// Sleep guard: while the agent is in "sleepy" state, drop all passive sensing
 	// (light.level, motion, sound) so they don't wake the agent and override the
-	// sleepy emotion. Only presence.enter and voice_command can wake the lamp.
+	// sleepy emotion. Only presence.enter, fire_hazard.detected, and voice_command can wake the lamp.
 	// web_chat is user-initiated text from the monitor UI — bypasses sleep-drop
 	// (forwarded to agent, TTS suppressed) but does NOT trigger physical wake.
 	// web_chat counts as passive for busy-gate so it queues on agent busy
@@ -190,7 +190,7 @@ func (h *SensingHandler) PostEvent(c *gin.Context) {
 	isVoiceCommand := req.Type == "voice_command"
 	isWebChat := req.Type == "web_chat"
 	isPassive := !isVoiceCommand
-	if isPassive && !isVoice && !isWebChat && req.Type != "presence.enter" && h.isSleeping != nil && h.isSleeping() {
+	if isPassive && !isVoice && !isWebChat && req.Type != "presence.enter" && req.Type != "fire_hazard.detected" && h.isSleeping != nil && h.isSleeping() {
 		slog.Info("INBOUND from LeLamp → SLEEP-DROPPED (lamp sleeping)",
 			"component", "sensing", "backend", h.agentGateway.Name(), "type", req.Type)
 		h.monitorBus.Push(domain.MonitorEvent{
@@ -268,7 +268,7 @@ func (h *SensingHandler) PostEvent(c *gin.Context) {
 	}
 
 	// Guard mode: mark the run so SSE handler broadcasts the response via Telegram Bot API.
-	guardActive := isPassive && h.config.GuardModeEnabled() && (req.Type == "presence.enter" || req.Type == "motion")
+	guardActive := isPassive && h.config.GuardModeEnabled() && (req.Type == "presence.enter" || req.Type == "motion" || req.Type == "fire_hazard.detected")
 	if guardActive {
 		slog.Info("guard mode active", "component", "sensing", "type", req.Type)
 	}
@@ -1042,6 +1042,7 @@ func shouldQueueEvent(eventType, message string, inVoiceWindow bool) bool {
 	switch eventType {
 	case "presence.enter", "presence.leave", "voice",
 		"motion.activity", "emotion.detected", "speech_emotion.detected",
+		"fire_hazard.detected",
 		"web_chat":
 		return true
 	case "sound":

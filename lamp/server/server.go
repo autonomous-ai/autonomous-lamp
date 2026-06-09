@@ -34,14 +34,12 @@ import (
 	"go-lamp.autonomous.ai/internal/healthwatch"
 	"go-lamp.autonomous.ai/internal/network"
 	"go-lamp.autonomous.ai/internal/statusled"
-	devicebutton "go-lamp.autonomous.ai/lib/devicebutton"
 	"go-lamp.autonomous.ai/lib/i18n"
 	"go-lamp.autonomous.ai/lib/lelamp"
 	"go-lamp.autonomous.ai/lib/logger"
 	"go-lamp.autonomous.ai/lib/mqtt"
 	"go-lamp.autonomous.ai/lib/safego"
 	"go-lamp.autonomous.ai/server/config"
-	_deviceGPIODeliver "go-lamp.autonomous.ai/server/device/delivery/gpio"
 	_deviceHttpDeliver "go-lamp.autonomous.ai/server/device/delivery/http"
 	_deviceMQTTDeliver "go-lamp.autonomous.ai/server/device/delivery/mqtt"
 	_healthHttpDeliver "go-lamp.autonomous.ai/server/health/delivery/http"
@@ -63,7 +61,6 @@ type Server struct {
 	networkHandler    _networkHttpDeliver.NetworkHandler
 	deviceHandler     _deviceHttpDeliver.DeviceHandler
 	deviceMQTTHandler _deviceMQTTDeliver.DeviceMQTTHandler
-	deviceGPIOHandler _deviceGPIODeliver.DeviceGPIOHandler
 	agentHandler   _agentHttpDeliver.AgentHandler
 	sensingHandler    _sensingHttpDeliver.SensingHandler
 	buddyHandler      _buddyHttpDeliver.BuddyHandler
@@ -75,8 +72,6 @@ type Server struct {
 	healthWatch    *healthwatch.Service
 	statusLED      *statusled.Service
 
-	// resetButton watches GPIO 23 for press-and-hold >= 10s to trigger factory reset. Nil when GPIO unavailable.
-	deviceButton *devicebutton.DeviceButton
 	// mqttFactory is the optional MQTT factory (nil when broker not configured).
 	mqttFactory *mqtt.Factory
 	// mqttClient is the active MQTT client when setup is complete; guarded by mqttMu.
@@ -119,14 +114,12 @@ func ProvideServer(
 	nh _networkHttpDeliver.NetworkHandler,
 	dh _deviceHttpDeliver.DeviceHandler,
 	dqth _deviceMQTTDeliver.DeviceMQTTHandler,
-	dgph _deviceGPIODeliver.DeviceGPIOHandler,
 	agentH _agentHttpDeliver.AgentHandler,
 	sensingH _sensingHttpDeliver.SensingHandler,
 	buddyH _buddyHttpDeliver.BuddyHandler,
 	ds *device.Service,
 	agentGW domain.AgentGateway,
 	ns *network.Service,
-	deviceBtn *devicebutton.DeviceButton,
 	mqttFactory *mqtt.Factory,
 	ambientSvc *ambient.Service,
 	hw *healthwatch.Service,
@@ -138,14 +131,12 @@ func ProvideServer(
 		networkHandler:    nh,
 		deviceHandler:     dh,
 		deviceMQTTHandler: dqth,
-		deviceGPIOHandler: dgph,
 		agentHandler:   agentH,
 		sensingHandler:    sensingH,
 		buddyHandler:      buddyH,
 		agentGateway:      agentGW,
 		networkService:    ns,
 		deviceService:     ds,
-		deviceButton:      deviceBtn,
 		mqttFactory:       mqttFactory,
 		ambientService:    ambientSvc,
 		healthWatch:       hw,
@@ -316,8 +307,8 @@ func hostOnly(addr string) string {
 
 // adminOrLoopbackAuth gates an endpoint with a hybrid policy: a strict-loopback
 // origin (no nginx proxy headers) bypasses auth entirely; everything else must
-// pass adminAuthMiddleware. Used by /api/system/factory-reset so the lelamp
-// GPIO long-press trigger can reach the endpoint with no Bearer (the device
+// pass adminAuthMiddleware. Used by /api/system/factory-reset so the on-device
+// factory-reset trigger can reach the endpoint with no Bearer (the device
 // might not even be set up yet — physical button = authority) while web calls
 // from the LAN still need admin credentials.
 func adminOrLoopbackAuth(cfg *config.Config) gin.HandlerFunc {
@@ -503,15 +494,6 @@ func (s *Server) Serve(closeFn func()) error {
 	// below — a WS reconnect that lands before i18n is wired falls back to
 	// English even when STTLanguage is "vi"/"zh-*".
 	i18n.SetConfig(s.config)
-
-	// device button — disabled here so lelamp (Python) gpio_button can grab
-	// GPIO17. Long-press shutdown w/ servo release lives in lelamp.
-	// if err := s.deviceButton.Init(); err == nil {
-	// 	s.deviceButton.Start(context.Background(), s.deviceGPIOHandler.HandlePress, s.deviceGPIOHandler.HandlePressAndHold)
-	// 	defer s.deviceButton.Close()
-	// } else {
-	// 	slog.Info("[device button] can not init")
-	// }
 
 	s.handleSetUpCompleteChange(s.config.SetUpCompleted)
 	s.handleDeviceIDChange(s.config.DeviceID)
@@ -881,6 +863,11 @@ func (s *Server) handleSetUpCompleteChange(setupCompleted bool) {
 		// and the device holds only the refresh_token, so the actual exchange
 		// runs on the backend. Loop refreshes them before they lapse.
 		safego.Go("oauth-refresh", func() { s.deviceMQTTHandler.StartOAuthRefreshLoop(s.monitorCtx) })
+
+		// Keep MCP connector tokens (Notion/Figma/Asana/Linear/GitHub) fresh.
+		// Same model as oauth-refresh: only entries the backend flagged
+		// refresh:true (with a refresh_token) are rotated before they lapse.
+		safego.Go("connector-refresh", func() { s.deviceMQTTHandler.StartConnectorRefreshLoop(s.monitorCtx) })
 
 		s.restartMQTT()
 
