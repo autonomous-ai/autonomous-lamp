@@ -305,11 +305,11 @@ def release_servos():
         state.animation_service._event_thread.join(timeout=3.0)
     # Fully folded pose so the body is already at the mechanical floor
     # when torque is cut — no remaining gap to drop.
-    # elbow_pitch capped at 70.4° (lumi_final physical limit).
+    # base_pitch/elbow_pitch capped to lumi_final physical limits.
     rest_pos = {
         "base_yaw.pos": 0.0,
-        "base_pitch.pos": -90.0,
-        "elbow_pitch.pos": 70.4,
+        "base_pitch.pos": -61.93,
+        "elbow_pitch.pos": 62.9,
         "wrist_roll.pos": 0.0,
         "wrist_pitch.pos": 0.0,
     }
