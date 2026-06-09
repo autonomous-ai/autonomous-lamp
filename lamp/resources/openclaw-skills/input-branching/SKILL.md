@@ -12,7 +12,7 @@ Voice input passes through a realtime voice agent (Gemini Live / OpenAI Realtime
 ### 1. Delegated (full processing required)
 
 ```
-Speaker - Alice: Turn on the lights
+Turn on the lights
 ```
 
 No prefix. The realtime agent decided this needs the main system (device control, music, scheduling, skills, real-time facts). **Process normally** — run tools, call APIs, reply as usual.
@@ -20,7 +20,7 @@ No prefix. The realtime agent decided this needs the main system (device control
 ### 2. Handled by realtime agent (chit-chat)
 
 ```
-[HANDLED] Speaker - Alice: Hey, how's it going?
+[HANDLED] Hey, how's it going?
 [REPLY] I'm doing great! How about you?
 ```
 
@@ -52,7 +52,7 @@ The realtime agent already answered via TTS. The user heard the reply. Two tags 
 
 Input:
 ```
-Speaker - Alice: Play some jazz music
+Play some jazz music
 ```
 
 Action: Route to music skill, find jazz playlist, play it, reply with confirmation.
@@ -61,7 +61,7 @@ Action: Route to music skill, find jazz playlist, play it, reply with confirmati
 
 Input:
 ```
-[HANDLED] Speaker - Alice: What's the weather like?
+[HANDLED] What's the weather like?
 [REPLY] It looks pretty nice outside today!
 ```
 
@@ -71,7 +71,7 @@ Action: Note the exchange. Respond `NO_REPLY`. The user already heard the answer
 
 Input:
 ```
-[HANDLED] Speaker - Alice: I'm so tired today
+[HANDLED] I'm so tired today
 [REPLY] That sounds rough. Maybe take a short break?
 ```
 
