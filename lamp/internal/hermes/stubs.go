@@ -128,3 +128,27 @@ func (s *Service) NewSession(sessionKey string) error {
 	// header so we don't pre-clear it.
 	return nil
 }
+
+// TODO(hermes-identity): implement UpdateIdentityName once Hermes has an
+// identity surface (wake word / personality name). Currently bypassed — under
+// Hermes, IDENTITY.md is owned by the external Hermes server, not Lumi.
+func (s *Service) UpdateIdentityName(_ string) error {
+	slog.Info("UpdateIdentityName: no-op (hermes backend — TODO)", "component", "hermes")
+	return nil
+}
+
+// TODO(hermes-mcp): implement WriteMCPEntry once Hermes exposes an MCP
+// connector config surface. Currently bypassed so the AgentGateway interface
+// is satisfied — MCP connector writes are an OpenClaw-only feature today.
+func (s *Service) WriteMCPEntry(_ string, _ map[string]any) error {
+	slog.Info("WriteMCPEntry: no-op (hermes backend — TODO)", "component", "hermes")
+	return nil
+}
+
+// TODO(hermes-mcp): implement RemoveMCPEntry alongside WriteMCPEntry. Returns
+// removed=false so callers (mcp_connector_writer) treat it as "entry already
+// absent" — idempotent no-op, no restart triggered.
+func (s *Service) RemoveMCPEntry(_ string) (bool, error) {
+	slog.Info("RemoveMCPEntry: no-op (hermes backend — TODO)", "component", "hermes")
+	return false, nil
+}
