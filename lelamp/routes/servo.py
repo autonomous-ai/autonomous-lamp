@@ -322,7 +322,7 @@ def release_servos():
         "base_pitch":  1456,  # -75.26° — mid=2312.5
         "elbow_pitch": 1626,  # -65.02° — mid=2366.5
         "wrist_roll":  2070,  #   0.00° — mid=2070.0
-        "wrist_pitch": 1679,  # -79.83° — mid=2588.0
+        "wrist_pitch": 1516,  # -94.17° — mid=2588.0
     }
     try:
         state.animation_service.move_to_raw(rest_raw, duration=4.0)
