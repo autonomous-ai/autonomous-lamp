@@ -41,7 +41,6 @@ logger = logging.getLogger(__name__)
 
 
 class GeminiLiveAgent(VoiceAgentBase):
-    DEFAULT_RECONNECT_MAX_RETRIES: int = 3
     DEFAULT_RECONNECT_DELAY_S: float = 2.0
     DEFAULT_SEND_TIMEOUT_S: float = 10.0
     DEFAULT_RECV_TIMEOUT_S: float = 300.0
@@ -68,7 +67,6 @@ class GeminiLiveAgent(VoiceAgentBase):
         self._first_audio_received: bool = False
         self._vad_disabled: bool = not config.vad_enabled
         self._activity_started: bool = False
-        self._reconnect_max_retries: int = self.DEFAULT_RECONNECT_MAX_RETRIES
         self._reconnect_delay_s: float = self.DEFAULT_RECONNECT_DELAY_S
         self._send_timeout_s: float = self.DEFAULT_SEND_TIMEOUT_S
         self._recv_timeout_s: float = self.DEFAULT_RECV_TIMEOUT_S
@@ -297,20 +295,14 @@ class GeminiLiveAgent(VoiceAgentBase):
         if self._loop is None:
             logger.error("Cannot reconnect — event loop is None")
             return
-        for attempt in range(1, self._reconnect_max_retries + 1):
-            try:
-                logger.info(
-                    "Reconnecting (attempt %d/%d)", attempt, self._reconnect_max_retries
-                )
-                self._submit_and_wait(self._async_disconnect())
-                self._submit_and_wait(self._async_connect())
-                self._connected.set()
-                return
-            except Exception as e:
-                logger.warning("Reconnect attempt %d failed: %s", attempt, e)
-                if attempt < self._reconnect_max_retries:
-                    time.sleep(self._reconnect_delay_s)
-        logger.error("All reconnect attempts failed")
+        try:
+            logger.info("Reconnecting...")
+            self._submit_and_wait(self._async_disconnect())
+            self._submit_and_wait(self._async_connect())
+            self._connected.set()
+        except Exception as e:
+            logger.warning("Reconnect failed: %s — will retry after delay", e)
+            time.sleep(self._reconnect_delay_s)
 
     # --- VoiceAgentBase implementation ---
 

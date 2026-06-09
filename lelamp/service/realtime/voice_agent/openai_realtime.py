@@ -52,7 +52,6 @@ class OpenAIRealtimeAgent(VoiceAgentBase):
         )
         self._connection: RealtimeConnection | None = None
         self._speech_stopped_at: float | None = None
-        self._reconnect_max_retries: int = 3
         self._reconnect_delay_s: float = 2.0
 
     @property
@@ -232,20 +231,14 @@ class OpenAIRealtimeAgent(VoiceAgentBase):
 
     def _reconnect(self) -> None:
         self._connected.clear()
-        for attempt in range(1, self._reconnect_max_retries + 1):
-            try:
-                logger.info(
-                    "Reconnecting (attempt %d/%d)", attempt, self._reconnect_max_retries
-                )
-                self._sync_disconnect()
-                self._sync_connect()
-                self._connected.set()
-                return
-            except Exception as e:
-                logger.warning("Reconnect attempt %d failed: %s", attempt, e)
-                if attempt < self._reconnect_max_retries:
-                    time.sleep(self._reconnect_delay_s)
-        logger.error("All reconnect attempts failed")
+        try:
+            logger.info("Reconnecting...")
+            self._sync_disconnect()
+            self._sync_connect()
+            self._connected.set()
+        except Exception as e:
+            logger.warning("Reconnect failed: %s — will retry after delay", e)
+            time.sleep(self._reconnect_delay_s)
 
     # --- VoiceAgentBase implementation ---
 
