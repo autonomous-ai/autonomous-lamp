@@ -312,25 +312,20 @@ def release_servos():
     state.animation_service._running.clear()
     if state.animation_service._event_thread and state.animation_service._event_thread.is_alive():
         state.animation_service._event_thread.join(timeout=3.0)
-    # Gravity-rest pose for lumi_final — where the arm naturally settles with
-    # torque off. base_pitch, elbow_pitch, wrist_pitch exceed calibrated
-    # range_min so move_to_unclamped bypasses lerobot's software clamp.
-    rest_pos = {
-        "base_yaw.pos": 3.0,
-        "base_pitch.pos": -75.26,
-        "elbow_pitch.pos": -65.02,
-        "wrist_roll.pos": 0.0,
-        "wrist_pitch.pos": -79.83,
+    # Gravity-rest pose for lumi_final in raw encoder units.
+    # Pre-computed from calibration JSON: raw = round(deg * 4095/360 + mid)
+    # where mid = (range_min + range_max) / 2.
+    # base_pitch/elbow_pitch/wrist_pitch exceed calibrated range_min so we
+    # use move_to_raw (direct STS3215 writes) to bypass lerobot's software clamp.
+    rest_raw = {
+        "base_yaw":    2075,  #   3.00° — mid=2041.5
+        "base_pitch":  1456,  # -75.26° — mid=2312.5
+        "elbow_pitch": 1626,  # -65.02° — mid=2366.5
+        "wrist_roll":  2070,  #   0.00° — mid=2070.0
+        "wrist_pitch": 1679,  # -79.83° — mid=2588.0
     }
     try:
-        # move_to commands the ramp but does not verify the servo physically
-        # arrived. Under load the motor lags the command, so poll
-        # Present_Position until every joint is within tolerance of rest_pos
-        # before cutting torque — otherwise the body drops the remaining gap.
-        # move_to_unclamped sends the final exact write at end of duration;
-        # no need to poll since some joints exceed the calibrated range and
-        # lerobot's normalized read would clip them (false timeout warning).
-        state.animation_service.move_to_unclamped(rest_pos, duration=4.0)
+        state.animation_service.move_to_raw(rest_raw, duration=4.0)
     except Exception as e:
         state.logger.warning(f"Could not move to rest before release: {e}")
     bus = state.animation_service.robot.bus

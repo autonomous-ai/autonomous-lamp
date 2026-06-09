@@ -536,45 +536,33 @@ class AnimationService:
             logger.warning(f"move_to: could not read full state after move: {e}")
         self._current_state = target_positions.copy()
 
-    def move_to_unclamped(self, target_degrees: Dict[str, float], duration: float = DEFAULT_MOVE_DURATION):
-        """Like move_to but bypasses lerobot calibration range limits via direct STS3215 writes.
+    def move_to_raw(self, target_raw: Dict[str, int], duration: float = DEFAULT_MOVE_DURATION):
+        """Smoothly move servos to raw encoder positions via direct STS3215 register writes.
 
-        Use for release/collapse positions that exceed the calibrated range_min/max.
-        Raw encoder targets are computed from the existing calibration mid-point so the
-        degree→raw mapping is consistent; only the software clamp is removed.
+        Bypasses lerobot calibration range limits entirely. Use for release/collapse
+        positions that exceed the calibrated range_min/max. Caller pre-computes raw
+        encoder targets so no bus.calibration access is needed here.
+
+        Args:
+            target_raw: motor_name → raw encoder value (0-4095), e.g. {"base_pitch": 1456}
+            duration: seconds to reach the target
         """
         if not self.robot:
             raise RuntimeError("Robot not connected")
 
-        from scservo_sdk import COMM_SUCCESS
         GOAL_POSITION_REG = 42     # STS3215: Goal_Position (2 bytes, LSB first)
         PRESENT_POSITION_REG = 56  # STS3215: Present_Position (2 bytes)
 
         ph = self.robot.bus.port_handler
         pk = self.robot.bus.packet_handler
-        calib = self.robot.bus.calibration
 
-        # Convert degree targets to raw encoder values (no range clamp, only 0-4095 physical limit)
-        target_raw: Dict[str, int] = {}
-        for joint_key, deg in target_degrees.items():
-            motor_name = joint_key.replace(".pos", "")
-            c = calib.get(motor_name)
-            if c is None:
-                logger.warning("move_to_unclamped: no calibration for %s, skipping", motor_name)
-                continue
-            mid = (c["range_min"] + c["range_max"]) / 2
-            raw = int(deg * 4095 / 360 + mid)
-            target_raw[motor_name] = max(0, min(4095, raw))
-
-        # Read current raw positions directly
+        # Read current raw positions directly (bypasses normalization)
         current_raw: Dict[str, int] = {}
         with self.bus_lock:
-            for motor_name, motor in self.robot.bus.motors.items():
-                data, result, _ = pk.read2ByteTxRx(ph, motor.id, PRESENT_POSITION_REG)
-                if result == COMM_SUCCESS:
-                    current_raw[motor_name] = data
-                else:
-                    current_raw[motor_name] = target_raw.get(motor_name, 2048)
+            for motor_name, motor_obj in self.robot.bus.motors.items():
+                data, result, _ = pk.read2ByteTxRx(ph, motor_obj.id, PRESENT_POSITION_REG)
+                # result==0 means COMM_SUCCESS in scservo_sdk
+                current_raw[motor_name] = data if result == 0 else target_raw.get(motor_name, 2048)
 
         total_frames = max(1, int(duration * self.fps))
 
@@ -586,8 +574,9 @@ class AnimationService:
                 for motor_name, target in target_raw.items():
                     cur = current_raw.get(motor_name, target)
                     raw = max(0, min(4095, int(cur + (target - cur) * progress)))
-                    motor_id = self.robot.bus.motors[motor_name].id
-                    pk.write2ByteTxRx(ph, motor_id, GOAL_POSITION_REG, raw)
+                    motor_obj = self.robot.bus.motors.get(motor_name)
+                    if motor_obj:
+                        pk.write2ByteTxRx(ph, motor_obj.id, GOAL_POSITION_REG, raw)
 
             dt = time.perf_counter() - t0
             sleep_time = (1.0 / self.fps) - dt
@@ -597,8 +586,9 @@ class AnimationService:
         # Final exact write
         with self.bus_lock:
             for motor_name, raw in target_raw.items():
-                motor_id = self.robot.bus.motors[motor_name].id
-                pk.write2ByteTxRx(ph, motor_id, GOAL_POSITION_REG, raw)
+                motor_obj = self.robot.bus.motors.get(motor_name)
+                if motor_obj:
+                    pk.write2ByteTxRx(ph, motor_obj.id, GOAL_POSITION_REG, raw)
 
         try:
             with self.bus_lock:
@@ -606,4 +596,4 @@ class AnimationService:
             if pos:
                 self._current_state = pos
         except Exception as e:
-            logger.warning("move_to_unclamped: could not read state after move: %s", e)
+            logger.warning("move_to_raw: could not read state after move: %s", e)
