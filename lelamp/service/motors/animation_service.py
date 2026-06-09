@@ -77,6 +77,10 @@ class AnimationService:
         # Serial bus lock — all bus access (read/write/ping) must hold this lock
         self.bus_lock = threading.RLock()
 
+        # One-shot duration override for the next _handle_play interpolation (resume slow-start).
+        # Set before dispatch; consumed and cleared inside _handle_play.
+        self._resume_duration: Optional[float] = None
+
         # Freeze flag — when set, _continue_playback() skips servo writes so camera can capture a stable frame
         self._frozen = threading.Event()
 
@@ -274,9 +278,12 @@ class AnimationService:
         self._current_actions = actions
         self._current_frame_index = 0
         
-        # If we have a current state, set up interpolation to the first frame
+        # If we have a current state, set up interpolation to the first frame.
+        # _resume_duration overrides self.duration once (set by resume endpoint for slow-start).
         if self._current_state is not None:
-            self._interpolation_frames = int(self.duration * self.fps)
+            effective_duration = self._resume_duration if self._resume_duration is not None else self.duration
+            self._resume_duration = None
+            self._interpolation_frames = int(effective_duration * self.fps)
             self._interpolation_target = actions[0]
         else:
             self._interpolation_frames = 0
