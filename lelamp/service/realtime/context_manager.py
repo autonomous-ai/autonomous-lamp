@@ -31,8 +31,8 @@ class RealtimeContextManager:
         language: str | None = None,
         max_memory_entries: int = app_config.REALTIME_MAX_MEMORY_ENTRIES,
         trim_keep: int = app_config.REALTIME_MEMORY_TRIM_KEEP,
-        lamp_memory_count: int = app_config.REALTIME_LAMP_MEMORY_COUNT,
-        realtime_memory_count: int = app_config.REALTIME_MEMORY_COUNT,
+        lamp_memory_max_chars: int = app_config.REALTIME_LAMP_MEMORY_MAX_CHARS,
+        realtime_memory_max_chars: int = app_config.REALTIME_MEMORY_MAX_CHARS,
         summarizer: RealtimeSummarizer | None = None,
     ) -> None:
         self._workspace: Path = Path(workspace_dir)
@@ -40,8 +40,8 @@ class RealtimeContextManager:
         self._language: str = language or "English"
         self._max_memory_entries: int = max_memory_entries
         self._trim_keep: int = trim_keep
-        self._lamp_memory_count: int = lamp_memory_count
-        self._realtime_memory_count: int = realtime_memory_count
+        self._lamp_memory_max_chars: int = lamp_memory_max_chars
+        self._realtime_memory_max_chars: int = realtime_memory_max_chars
         self._summarizer: RealtimeSummarizer | None = summarizer
         # Summary file alongside the memory JSONL
         self._summary_path: Path = self._realtime_memory_path.parent / "summary.md"
@@ -191,20 +191,25 @@ class RealtimeContextManager:
         return "\n\n".join(entries)
 
     def _load_lamp_memory_entries(self) -> list[str]:
-        """Load the latest N entries from workspace/memory/*.md as a list."""
+        """Load entries from workspace/memory/*.md up to char budget."""
         memory_dir: Path = self._workspace / "memory"
         if not memory_dir.is_dir():
             return []
 
         md_files: list[Path] = sorted(memory_dir.glob("*.md"), reverse=True)
-        selected: list[Path] = md_files[: self._lamp_memory_count]
 
         entries: list[str] = []
-        for md_file in selected:
+        total_chars: int = 0
+        for md_file in md_files:
             try:
                 content: str = md_file.read_text(encoding="utf-8").strip()
-                if content:
-                    entries.append(f"## {md_file.stem}\n\n{content}")
+                if not content:
+                    continue
+                entry: str = f"## {md_file.stem}\n\n{content}"
+                if total_chars + len(entry) > self._lamp_memory_max_chars:
+                    break
+                entries.append(entry)
+                total_chars += len(entry)
             except Exception as e:
                 logger.warning("Failed to read memory %s: %s", md_file, e)
         return entries
@@ -236,8 +241,19 @@ class RealtimeContextManager:
             logger.warning("Failed to read realtime memory: %s", e)
             return entries
 
-        recent: list[str] = lines[-self._realtime_memory_count :]
-        entries.extend(self._parse_jsonl_lines(recent))
+        # Load entries from the end until char budget is reached
+        total_chars: int = sum(len(e) for e in entries)
+        selected_lines: list[str] = []
+        for line in reversed(lines):
+            formatted: str = self._format_jsonl_entry(line)
+            if not formatted:
+                continue
+            if total_chars + len(formatted) > self._realtime_memory_max_chars:
+                break
+            selected_lines.append(formatted)
+            total_chars += len(formatted)
+        selected_lines.reverse()
+        entries.extend(selected_lines)
         return entries
 
     def _trim_memory_if_needed(self) -> None:

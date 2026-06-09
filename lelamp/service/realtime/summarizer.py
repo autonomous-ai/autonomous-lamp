@@ -15,6 +15,8 @@ SUMMARIZE_PROMPT_PATH = RESOURCES_DIR / "summarize_prompt.md"
 class RealtimeSummarizer:
     """Summarize text entries using the Anthropic Messages API."""
 
+    MAX_INPUT_CHARS: int = 100_000
+
     def __init__(
         self,
         api_key: str = app_config.REALTIME_SUMMARIZER_API_KEY,
@@ -24,6 +26,7 @@ class RealtimeSummarizer:
         self._client: anthropic.Anthropic = anthropic.Anthropic(
             api_key=api_key,
             base_url=base_url,
+            timeout=120.0,
         )
         self._model: str = model
         try:
@@ -43,6 +46,9 @@ class RealtimeSummarizer:
             return ""
 
         user_content: str = "\n\n---\n\n".join(entries)
+        if len(user_content) > self.MAX_INPUT_CHARS:
+            logger.info("Truncating summarizer input: %d → %d chars", len(user_content), self.MAX_INPUT_CHARS)
+            user_content = user_content[-self.MAX_INPUT_CHARS :]
 
         try:
             response = self._client.messages.create(
