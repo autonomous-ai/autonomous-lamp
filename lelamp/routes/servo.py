@@ -312,42 +312,25 @@ def release_servos():
     state.animation_service._running.clear()
     if state.animation_service._event_thread and state.animation_service._event_thread.is_alive():
         state.animation_service._event_thread.join(timeout=3.0)
-    # Natural gravity-rest pose — matches where the arm physically settles
-    # after torque is cut, so there is no drop when releasing.
+    # Gravity-rest pose for lumi_final — where the arm naturally settles with
+    # torque off. base_pitch, elbow_pitch, wrist_pitch exceed calibrated
+    # range_min so move_to_unclamped bypasses lerobot's software clamp.
     rest_pos = {
-        "base_yaw.pos": 0.0,
-        "base_pitch.pos": -75.88,
-        "elbow_pitch.pos": 62.4,
+        "base_yaw.pos": 3.0,
+        "base_pitch.pos": -75.26,
+        "elbow_pitch.pos": -65.02,
         "wrist_roll.pos": 0.0,
-        "wrist_pitch.pos": 0.0,
+        "wrist_pitch.pos": -79.83,
     }
     try:
         # move_to commands the ramp but does not verify the servo physically
         # arrived. Under load the motor lags the command, so poll
         # Present_Position until every joint is within tolerance of rest_pos
         # before cutting torque — otherwise the body drops the remaining gap.
-        state.animation_service.move_to(rest_pos, duration=4.0)
-        from lelamp.service.motors.animation_service import (
-            _motor_positions_from_bus,
-        )
-
-        tol_deg = 2.0
-        deadline = time.perf_counter() + 3.0
-        while time.perf_counter() < deadline:
-            with state.animation_service.bus_lock:
-                actual = _motor_positions_from_bus(
-                    state.animation_service.robot
-                )
-            if all(
-                abs(actual.get(k, 0.0) - v) <= tol_deg
-                for k, v in rest_pos.items()
-            ):
-                break
-            time.sleep(0.05)
-        else:
-            state.logger.warning(
-                "rest_pos not reached within 3s; releasing anyway"
-            )
+        # move_to_unclamped sends the final exact write at end of duration;
+        # no need to poll since some joints exceed the calibrated range and
+        # lerobot's normalized read would clip them (false timeout warning).
+        state.animation_service.move_to_unclamped(rest_pos, duration=4.0)
     except Exception as e:
         state.logger.warning(f"Could not move to rest before release: {e}")
     bus = state.animation_service.robot.bus
