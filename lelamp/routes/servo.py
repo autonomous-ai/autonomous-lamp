@@ -312,13 +312,12 @@ def release_servos():
     state.animation_service._running.clear()
     if state.animation_service._event_thread and state.animation_service._event_thread.is_alive():
         state.animation_service._event_thread.join(timeout=3.0)
-    # Fully folded pose so the body is already at the mechanical floor
-    # when torque is cut — no remaining gap to drop.
-    # base_pitch/elbow_pitch capped to lumi_final physical limits.
+    # Natural gravity-rest pose — matches where the arm physically settles
+    # after torque is cut, so there is no drop when releasing.
     rest_pos = {
         "base_yaw.pos": 0.0,
-        "base_pitch.pos": -61.93,
-        "elbow_pitch.pos": 62.9,
+        "base_pitch.pos": -75.88,
+        "elbow_pitch.pos": 62.4,
         "wrist_roll.pos": 0.0,
         "wrist_pitch.pos": 0.0,
     }
