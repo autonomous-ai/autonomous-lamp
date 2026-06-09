@@ -32,6 +32,7 @@ from lelamp.presets import (
     AIM_RIGHT,
     SERVO_CMD_PLAY,
 )
+from lelamp.service.motors.animation_service import RESUME_STARTUP_RAW, STARTUP_MOVE_DURATION
 
 router = APIRouter(tags=["Servo"])
 
@@ -202,14 +203,22 @@ def resume_servos():
         raise HTTPException(503, "Servo not available")
     state.animation_service._zero_mode = False
     state.animation_service._hold_mode = False
-    # Sync actual arm positions before the event loop starts so _current_state
-    # reflects hardware, not the stale rest_pos from before torque was cut.
+    # Re-enable torque and reconfigure servos (release left torque disabled)
+    try:
+        state.animation_service._configure_servos_raw()
+    except Exception as e:
+        state.logger.warning("resume: raw configure failed: %s", e)
+    # Move to wake position before entering idle (arm lifts from release pose)
+    try:
+        state.animation_service.move_to_raw(RESUME_STARTUP_RAW, duration=STARTUP_MOVE_DURATION)
+        state.logger.info("Servo moved to resume startup position")
+    except Exception as e:
+        state.logger.warning("resume: startup move failed: %s", e)
+    # Sync state from hardware now that arm is at a known position
     state.animation_service._sync_state_from_hardware()
-    # Resume at ~30% slower than the 2x base: 2.0/0.7 ≈ 2.86x normal duration (~14.3s).
-    state.animation_service._resume_duration = state.animation_service.duration * 2.0 / 0.7
+    # Normal interpolation duration (arm arrives from a controlled position)
+    state.animation_service._resume_duration = state.animation_service.duration
     if not state.animation_service._running.is_set():
-        # Set running and queue the event BEFORE starting the thread so the
-        # event is the first thing the loop processes (no race with _continue_playback).
         state.animation_service._running.set()
         state.animation_service.dispatch(SERVO_CMD_PLAY, state.animation_service.idle_recording)
         state.animation_service._event_thread = threading.Thread(

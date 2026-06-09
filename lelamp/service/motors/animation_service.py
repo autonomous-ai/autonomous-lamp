@@ -12,14 +12,18 @@ logger = logging.getLogger(__name__)
 # Default interpolation duration for move_to (seconds)
 DEFAULT_MOVE_DURATION = 2.0
 
-# Startup position for base_pitch and elbow_pitch only.
-# Other servos (base_yaw, wrist_roll, wrist_pitch) are left released.
-STARTUP_POSITION = {
-    "base_pitch.pos": -30.0,
-    "elbow_pitch.pos": 57.0,
+# Wake/resume position in raw encoder units — all 5 joints.
+# Pre-computed from calibration JSON: raw = int(deg * 4095/360 + mid), mid=(range_min+range_max)/2.
+# wrist_pitch (-68.48°, raw 1809) exceeds calibrated range_min=2044, so move_to_raw is used.
+RESUME_STARTUP_RAW = {
+    "base_yaw":    2109,  #   5.96° — mid=2041.5
+    "base_pitch":  2105,  # -18.20° — mid=2312.5
+    "elbow_pitch": 2233,  # -11.68° — mid=2366.5
+    "wrist_roll":  2070,  #   0.00° — mid=2070.0
+    "wrist_pitch": 1809,  # -68.48° — mid=2588.0
 }
 
-# Duration for the startup move (seconds)
+# Duration for the startup/resume move (seconds)
 STARTUP_MOVE_DURATION = 5.0
 
 # Recordings that hold final pose instead of returning to idle
@@ -146,10 +150,10 @@ class AnimationService:
 
         logger.info(f"Animation service connected to {self.port}")
 
-        # Move base_pitch and elbow_pitch to startup position
+        # Move all joints to wake/startup position (includes wrist_pitch outside calib range)
         try:
-            self.move_to(STARTUP_POSITION, duration=STARTUP_MOVE_DURATION)
-            logger.info("Servos 2,3 moved to startup position")
+            self.move_to_raw(RESUME_STARTUP_RAW, duration=STARTUP_MOVE_DURATION)
+            logger.info("Servos moved to startup position")
         except Exception as e:
             logger.warning(f"Failed to move to startup position: {e}")
 
