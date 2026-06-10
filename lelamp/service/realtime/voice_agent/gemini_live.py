@@ -41,12 +41,6 @@ logger = logging.getLogger(__name__)
 
 
 class GeminiLiveAgent(VoiceAgentBase):
-    DEFAULT_RECONNECT_DELAY_S: float = 2.0
-    DEFAULT_SEND_TIMEOUT_S: float = 10.0
-    DEFAULT_RECV_TIMEOUT_S: float = 300.0
-    DEFAULT_QUEUE_POLL_S: float = 1.0
-    DEFAULT_JOIN_TIMEOUT_S: float = 5.0
-
     def __init__(
         self,
         config: GeminiConfig,
@@ -67,11 +61,13 @@ class GeminiLiveAgent(VoiceAgentBase):
         self._first_audio_received: bool = False
         self._vad_disabled: bool = not config.vad_enabled
         self._activity_started: bool = False
-        self._reconnect_delay_s: float = self.DEFAULT_RECONNECT_DELAY_S
-        self._send_timeout_s: float = self.DEFAULT_SEND_TIMEOUT_S
-        self._recv_timeout_s: float = self.DEFAULT_RECV_TIMEOUT_S
-        self._queue_poll_s: float = self.DEFAULT_QUEUE_POLL_S
-        self._join_timeout_s: float = self.DEFAULT_JOIN_TIMEOUT_S
+        self._reconnect_delay_s: float = config.reconnect_delay_s
+        self._last_reconnect_at: float = 0.0
+        self._max_retries: int = config.max_retries
+        self._send_timeout_s: float = config.send_timeout_s
+        self._recv_timeout_s: float = config.recv_timeout_s
+        self._queue_poll_s: float = config.queue_poll_s
+        self._join_timeout_s: float = config.join_timeout_s
 
     @property
     @override
@@ -289,6 +285,16 @@ class GeminiLiveAgent(VoiceAgentBase):
 
     # --- Reconnect ---
 
+    def _ensure_connected(self) -> None:
+        """Reconnect if not connected. Throttled to at most once per reconnect_delay_s."""
+        if self._connected.is_set():
+            return
+        now: float = time.perf_counter()
+        if now - self._last_reconnect_at < self._reconnect_delay_s:
+            return
+        self._last_reconnect_at = now
+        self._reconnect()
+
     def _reconnect(self) -> None:
         self._connected.clear()
         self._activity_started = False
@@ -352,22 +358,27 @@ class GeminiLiveAgent(VoiceAgentBase):
             except queue.Empty:
                 continue
 
-            try:
-                if isinstance(event, AudioCommitEvent):
-                    self._submit_and_wait(
-                        self._async_commit(), timeout=self._send_timeout_s
-                    )
-                elif isinstance(event, InputEvent):
-                    self._submit_and_wait(
-                        self._async_send_input(event.input),
-                        timeout=self._send_timeout_s,
-                    )
-            except (ConnectionClosed, genai_errors.APIError) as e:
-                logger.warning("Send failed: %s — reconnecting", e)
-                self._reconnect()
-            except Exception as e:
-                logger.warning("Send error: %s — reconnecting", e)
-                self._reconnect()
+            for attempt in range(self._max_retries):
+                self._ensure_connected()
+                if not self._connected.is_set():
+                    continue
+                try:
+                    if isinstance(event, AudioCommitEvent):
+                        self._submit_and_wait(
+                            self._async_commit(), timeout=self._send_timeout_s
+                        )
+                    elif isinstance(event, InputEvent):
+                        self._submit_and_wait(
+                            self._async_send_input(event.input),
+                            timeout=self._send_timeout_s,
+                        )
+                    break  # Success
+                except (ConnectionClosed, genai_errors.APIError) as e:
+                    logger.warning("Send failed (attempt %d/%d): %s", attempt + 1, self._max_retries, e)
+                    self._reconnect()
+                except Exception as e:
+                    logger.warning("Send error (attempt %d/%d): %s", attempt + 1, self._max_retries, e)
+                    self._reconnect()
 
     @override
     def _recv_loop(self) -> None:
@@ -377,13 +388,31 @@ class GeminiLiveAgent(VoiceAgentBase):
             if not self._connected.is_set():
                 _ = self._connected.wait(timeout=self._queue_poll_s)
                 continue
-            try:
-                self._submit_and_wait(
-                    self._async_receive_turn(), timeout=self._recv_timeout_s
-                )
-            except (ConnectionClosed, genai_errors.APIError) as e:
-                logger.warning("Recv failed: %s — reconnecting", e)
-                self._reconnect()
-            except Exception as e:
-                logger.exception("Unexpected error in recv loop: %s", e)
-                self._reconnect()
+
+            for attempt in range(self._max_retries):
+                self._ensure_connected()
+                if not self._connected.is_set():
+                    continue
+                try:
+                    self._submit_and_wait(
+                        self._async_receive_turn(), timeout=self._recv_timeout_s
+                    )
+                    break  # Success — turn received
+                except ConnectionClosed as e:
+                    code: int | None = getattr(getattr(e, "rcvd", None), "code", None)
+                    if code == 1000:
+                        logger.info("Session closed normally (idle) — will reconnect on next audio")
+                        self._connected.clear()
+                        self._session = None
+                        break  # Don't retry on idle close
+                    logger.warning("Recv failed (attempt %d/%d): %s", attempt + 1, self._max_retries, e)
+                    self._connected.clear()
+                    self._session = None
+                except genai_errors.APIError as e:
+                    logger.warning("Recv API error (attempt %d/%d): %s", attempt + 1, self._max_retries, e)
+                    self._connected.clear()
+                    self._session = None
+                except Exception as e:
+                    logger.exception("Unexpected recv error (attempt %d/%d): %s", attempt + 1, self._max_retries, e)
+                    self._connected.clear()
+                    self._session = None
