@@ -24,13 +24,13 @@ import numpy.typing as npt
 import lelamp.config as config
 from lelamp.service.realtime.config import GeminiConfig, OpenAIConfig, _load_language
 from lelamp.service.realtime.context_manager import RealtimeContextManager
-from lelamp.service.realtime.summarizer import RealtimeSummarizer
 from lelamp.service.realtime.models import (
     FunctionCallOutput,
     FunctionCallResultInput,
     OutputBase,
     TextInput,
 )
+from lelamp.service.realtime.summarizer import RealtimeSummarizer
 from lelamp.service.realtime.voice_agent.base import VoiceAgentBase
 
 logger = logging.getLogger(__name__)
@@ -86,7 +86,10 @@ class RealtimeOrchestrator:
         if config.REALTIME_SUMMARIZER_ENABLED:
             try:
                 summarizer = RealtimeSummarizer()
-                logger.info("Realtime summarizer enabled (model=%s)", config.REALTIME_SUMMARIZER_MODEL)
+                logger.info(
+                    "Realtime summarizer enabled (model=%s)",
+                    config.REALTIME_SUMMARIZER_MODEL,
+                )
             except Exception as e:
                 logger.warning("Failed to create summarizer: %s", e)
         self._context: RealtimeContextManager = RealtimeContextManager(
@@ -119,14 +122,18 @@ class RealtimeOrchestrator:
             from lelamp.service.realtime.voice_agent.gemini_live import GeminiLiveAgent
 
             self._agent = GeminiLiveAgent(
-                config=GeminiConfig(instructions=instructions), tools=self._tools,
+                config=GeminiConfig(instructions=instructions),
+                tools=self._tools,
             )
 
         elif provider == "openai":
-            from lelamp.service.realtime.voice_agent.openai_realtime import OpenAIRealtimeAgent
+            from lelamp.service.realtime.voice_agent.openai_realtime import (
+                OpenAIRealtimeAgent,
+            )
 
             self._agent = OpenAIRealtimeAgent(
-                config=OpenAIConfig(instructions=instructions), tools=self._tools,
+                config=OpenAIConfig(instructions=instructions),
+                tools=self._tools,
             )
 
         else:
@@ -141,7 +148,14 @@ class RealtimeOrchestrator:
             self._agent = None
 
     def stop(self) -> None:
-        """Disconnect the agent."""
+        """Disconnect the agent and summarize unsummarized memory."""
+        # Summarize remaining memory before shutdown
+        try:
+            self._context.summarize_lamp_memory()
+            self._context.summarize_realtime_memory()
+        except Exception:
+            logger.exception("Failed to summarize memory on shutdown")
+
         if self._agent is not None:
             try:
                 self._agent.disconnect()
@@ -173,22 +187,33 @@ class RealtimeOrchestrator:
             return
 
         for output in self._agent.receive(stop_on_done=True):
-            if isinstance(output, FunctionCallOutput) and output.name == DELEGATE_TOOL_NAME:
+            if (
+                isinstance(output, FunctionCallOutput)
+                and output.name == DELEGATE_TOOL_NAME
+            ):
                 # Extract message from tool call arguments
                 import json as _json
+
                 delegate_msg: str = ""
                 try:
-                    args: dict = _json.loads(output.arguments) if output.arguments else {}
+                    args: dict = (
+                        _json.loads(output.arguments) if output.arguments else {}
+                    )
                     delegate_msg = args.get("message", "")
                 except (ValueError, TypeError):
                     pass
-                logger.info("Model delegated to main flow (message=%r)", delegate_msg[:100] if delegate_msg else "")
-                self._agent.send([
-                    FunctionCallResultInput(
-                        call_id=output.call_id,
-                        output='{"result": "delegated"}',
-                    )
-                ])
+                logger.info(
+                    "Model delegated to main flow (message=%r)",
+                    delegate_msg[:100] if delegate_msg else "",
+                )
+                self._agent.send(
+                    [
+                        FunctionCallResultInput(
+                            call_id=output.call_id,
+                            output='{"result": "delegated"}',
+                        )
+                    ]
+                )
                 yield DelegateSignal(message=delegate_msg)
                 return
             yield output
