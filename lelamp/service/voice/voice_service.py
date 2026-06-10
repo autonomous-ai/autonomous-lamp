@@ -25,6 +25,11 @@ from typing import Optional
 
 import requests
 
+from lelamp import app_state as lelamp_app_state
+from lelamp import config as lelamp_config
+from lelamp.service.realtime.models import TextOutput as RTTextOutput
+from lelamp.service.realtime.orchestrator import DelegateSignal, RealtimeOrchestrator
+from lelamp.service.realtime.utils import pcm16_bytes_to_float32, resample_float32
 from lelamp.service.voice._internal.audio_dsp import resample_to_stt, rms
 from lelamp.service.voice._internal.audio_recorder import ArecordStream
 from lelamp.service.voice._internal.config import (
@@ -57,11 +62,6 @@ from lelamp.service.voice._internal.speaker_decorate import SpeakerDecorator
 from lelamp.service.voice._internal.vad_filters import SileroVADFilter, WebRTCVADFilter
 from lelamp.service.voice.backchannel import Backchannel
 from lelamp.service.voice.stt_provider import STTProvider
-from lelamp import app_state as lelamp_app_state
-from lelamp import config as lelamp_config
-from lelamp.service.realtime.orchestrator import RealtimeOrchestrator, DelegateSignal
-from lelamp.service.realtime.models import TextOutput as RTTextOutput
-from lelamp.service.realtime.utils import pcm16_bytes_to_float32, resample_float32
 
 logger = logging.getLogger("lelamp.voice")
 
@@ -719,6 +719,7 @@ class VoiceService:
             longest_partial[0] = ""
             final_sent[0] = True
 
+        rt_audio_buffer: list = []
         try:
             if preconnected_session:
                 # Already connected — swap in the real transcript callback.
@@ -754,7 +755,6 @@ class VoiceService:
             if not connect_ok[0]:
                 return
 
-            rt_audio_buffer: list = []
             # Flush holdoff audio (frames captured before STT connect, both paths)
             all_pre = (speech_pre_buffer or []) + pre_buffer
             if all_pre:
@@ -769,7 +769,9 @@ class VoiceService:
                     # Also send pre-buffer to realtime model (non-blocking queue put)
                     if lelamp_config.REALTIME_ENABLED and self._realtime.available:
                         audio_f32 = pcm16_bytes_to_float32(frame)
-                        audio_f32 = resample_float32(audio_f32, STT_RATE, self._realtime.sample_rate)
+                        audio_f32 = resample_float32(
+                            audio_f32, STT_RATE, self._realtime.sample_rate
+                        )
                         self._realtime.append_audio(audio_f32)
                         rt_audio_buffer.append(audio_f32)
 
@@ -824,7 +826,9 @@ class VoiceService:
                 # Parallel: stream to realtime model (non-blocking queue put)
                 if lelamp_config.REALTIME_ENABLED and self._realtime.available:
                     audio_f32 = pcm16_bytes_to_float32(resampled)
-                    audio_f32 = resample_float32(audio_f32, STT_RATE, self._realtime.sample_rate)
+                    audio_f32 = resample_float32(
+                        audio_f32, STT_RATE, self._realtime.sample_rate
+                    )
                     self._realtime.append_audio(audio_f32)
                     rt_audio_buffer.append(audio_f32)
 
@@ -880,12 +884,15 @@ class VoiceService:
 
             # --- Realtime voice agent (runs first, before speaker ID / Lamp) ---
             # Runs even if STT transcript is empty — the model has the raw audio.
-            rt_delegated = False
-            rt_handled = False
+            rt_delegated = True  # Default to true to delegate to lamp by default
+            rt_delegate_msg: str = ""
             rt_transcript = ""
-            if lelamp_config.REALTIME_ENABLED and self._realtime.available and rt_audio_buffer:
-                logger.info("[realtime] Entering realtime flow — committing audio (stt=%r)",
-                            combined[:100] if combined else "(empty)")
+
+            if (
+                lelamp_config.REALTIME_ENABLED
+                and self._realtime.available
+                and rt_audio_buffer
+            ):
                 try:
                     # Inject per-turn context before committing
                     turn_ctx: list[str] = [
@@ -893,60 +900,82 @@ class VoiceService:
                     ]
                     try:
                         if lelamp_app_state.sensing_service:
-                            cu: str = lelamp_app_state.sensing_service._perception_orchestrator.current_user or ""
+                            cu: str = (
+                                lelamp_app_state.sensing_service._perception_orchestrator.current_user
+                                or ""
+                            )
                             if cu:
                                 turn_ctx.append(f"Current user: {cu}")
                     except Exception:
                         pass
                     self._realtime.send_text("[TURN CONTEXT] " + " | ".join(turn_ctx))
-
                     self._realtime.commit_audio()
+
                     logger.info("[realtime] Audio committed — streaming output")
+
                     text_parts: list[str] = []
                     sentence_buf: str = ""
                     first_sentence_sent: bool = False
                     SENTENCE_ENDS = (".", "!", "?", "。", "！", "？")
 
-                    rt_delegate_msg: str = ""
                     for output in self._realtime.stream_output():
                         if isinstance(output, DelegateSignal):
                             rt_delegated = True
                             rt_delegate_msg = output.message
                             break
+                        else:
+                            rt_delegated = False
+
                         if isinstance(output, RTTextOutput):
                             text_parts.append(output.text)
                             sentence_buf += output.text
                             # Flush complete sentences to TTS as they arrive
-                            if self._tts is not None and sentence_buf.rstrip().endswith(SENTENCE_ENDS):
+                            if self._tts is not None and sentence_buf.rstrip().endswith(
+                                SENTENCE_ENDS
+                            ):
                                 sentence: str = self.strip_rt_markers(sentence_buf)
                                 if sentence:
                                     if not first_sentence_sent:
-                                        logger.info("[realtime] First sentence → speak: %r", sentence[:80])
+                                        logger.info(
+                                            "[realtime] First sentence → speak: %r",
+                                            sentence[:80],
+                                        )
                                         self._tts.speak(sentence)
                                         first_sentence_sent = True
                                     else:
-                                        logger.info("[realtime] Next sentence → speak_queue: %r", sentence[:80])
+                                        logger.info(
+                                            "[realtime] Next sentence → speak_queue: %r",
+                                            sentence[:80],
+                                        )
                                         self._tts.speak_queue(sentence)
                                 sentence_buf = ""
 
                     rt_transcript = self.strip_rt_markers("".join(text_parts))
 
                     if rt_delegated:
-                        logger.info("[realtime] Model delegated → will forward to Lamp")
+                        logger.info(
+                            "[realtime] Final decision: delegated to Lamp - message=%r",
+                            rt_delegate_msg if rt_delegate_msg else "(empty)",
+                        )
                     else:
-                        rt_handled = True
                         # Flush any remaining text that didn't end with a sentence boundary
                         remaining: str = self.strip_rt_markers(sentence_buf)
                         if remaining and self._tts is not None:
                             if not first_sentence_sent:
-                                logger.info("[realtime] Final fragment → speak: %r", remaining[:80])
+                                logger.info(
+                                    "[realtime] Final fragment → speak: %r",
+                                    remaining[:80],
+                                )
                                 self._tts.speak(remaining)
                             else:
-                                logger.info("[realtime] Final fragment → speak_queue: %r", remaining[:80])
+                                logger.info(
+                                    "[realtime] Final fragment → speak_queue: %r",
+                                    remaining[:80],
+                                )
                                 self._tts.speak_queue(remaining)
                         logger.info(
-                            "[realtime] Chit-chat complete — transcript=%r",
-                            rt_transcript[:200] if rt_transcript else "(empty)",
+                            "[realtime] Final decision: realtime voice agent handled - transcript=%r",
+                            rt_transcript if rt_transcript else "(empty)",
                         )
                         # Save turn to realtime memory
                         if combined or rt_transcript:
@@ -955,10 +984,14 @@ class VoiceService:
                                 agent_text=rt_transcript or "(audio only)",
                             )
                 except Exception as e:
-                    logger.warning("[realtime] Processing failed: %s — will forward to Lamp", e)
+                    logger.warning(
+                        "[realtime] Processing failed: %s — will forward to Lamp", e
+                    )
                     rt_delegated = True  # fall through to Lamp on error
             elif lelamp_config.REALTIME_ENABLED:
-                logger.warning("[realtime] Enabled but agent not available — falling back to Lamp")
+                logger.warning(
+                    "[realtime] Enabled but agent not available — falling back to Lamp"
+                )
 
             # --- Speaker recognition + Lamp send ---
             from lelamp.service.voice.speech_emotion.constants import UNKNOWN_USER_LABEL
@@ -966,33 +999,42 @@ class VoiceService:
             final_text, event_type = self._decorator.resolve_wake_word_split(combined)
             user = UNKNOWN_USER_LABEL
 
-            if combined:
-                final_msg, se_user = self._decorator.identify_and_decorate(
-                    final_text, audio_buffer
-                )
-                user = se_user if se_user else UNKNOWN_USER_LABEL
-                logger.info("Final message → Lamp (%s): %r", event_type, final_msg)
+            final_msg, se_user = self._decorator.identify_and_decorate(
+                final_text, audio_buffer
+            )
+            user = se_user if se_user else UNKNOWN_USER_LABEL
+            lamp_msg: str = ""
 
-                if rt_handled:
-                    # Realtime already spoke — send as "voice_handled" to skip dead-air filler.
-                    # Include skill hint so OpenClaw reads input-branching and responds NO_REPLY.
-                    self._lamp_sender.send(
-                        f"[skills: input-branching]\n[HANDLED] {final_msg}\n[REPLY] {rt_transcript}",
-                        event_type="voice_agent_handled",
-                        skip_echo=True,
+            if rt_delegated:
+                # Delegated — send voice agent's summary + STT transcript to Lamp
+                if rt_delegate_msg:
+                    lamp_msg: str = (
+                        f"[instruction]{rt_delegate_msg}\n[transcript] {final_msg}"
+                        if final_msg
+                        else rt_delegate_msg
                     )
-                elif rt_delegated:
-                    # Delegated — send voice agent's summary + STT transcript to Lamp
-                    if rt_delegate_msg:
-                        lamp_msg: str = f"{rt_delegate_msg}\n[transcript] {final_msg}" if final_msg else rt_delegate_msg
-                    else:
-                        lamp_msg = final_msg
-                    logger.info("[realtime] Delegated with message: %r", lamp_msg[:100] if lamp_msg else "")
-                    if lamp_msg:
-                        self._lamp_sender.send(lamp_msg, event_type=event_type)
                 else:
-                    # Realtime not active — send to Lamp normally
-                    self._lamp_sender.send(final_msg, event_type=event_type)
+                    lamp_msg = final_msg
+
+                if lamp_msg:
+                    self._lamp_sender.send(lamp_msg, event_type=event_type)
+                    logger.info("[realtime] Sended message to lamp: %r", lamp_msg)
+                else:
+                    logger.info(
+                        "[realtime] Do not send message to lamp: lamp_msg is empty"
+                    )
+            else:
+                # Realtime already spoke — send as "voice_handled" to skip dead-air filler.
+                # Include skill hint so OpenClaw reads input-branching and responds NO_REPLY.
+                self._lamp_sender.send(
+                    f"[skills: input-branching]\n[HANDLED] {final_msg}\n[REPLY] {rt_transcript}",
+                    event_type="voice_agent_handled",
+                    skip_echo=True,
+                )
+                logger.info(
+                    "[realtime] Sended message to lamp: %r",
+                    f"[skills: input-branching]\n[HANDLED] {final_msg}\n[REPLY] {rt_transcript}",
+                )
 
             # 2. Submit SER — uses the UNTRIMMED snapshot so laughter / sighs
             self._decorator.submit_speech_emotion_from_session(

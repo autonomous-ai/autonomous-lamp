@@ -32,7 +32,7 @@ class RealtimeSummarizer:
         try:
             self._system_prompt: str = SUMMARIZE_PROMPT_PATH.read_text(encoding="utf-8").strip()
         except FileNotFoundError:
-            logger.warning("Summarize prompt not found at %s", SUMMARIZE_PROMPT_PATH)
+            logger.warning("[realtime] Summarize prompt not found at %s", SUMMARIZE_PROMPT_PATH)
             self._system_prompt = "Summarize the following entries concisely."
 
     def summarize(self, entries: list[str]) -> str:
@@ -47,7 +47,7 @@ class RealtimeSummarizer:
 
         user_content: str = "\n\n---\n\n".join(entries)
         if len(user_content) > self.MAX_INPUT_CHARS:
-            logger.info("Truncating summarizer input: %d → %d chars", len(user_content), self.MAX_INPUT_CHARS)
+            logger.info("[realtime] Truncating summarizer input: %d → %d chars", len(user_content), self.MAX_INPUT_CHARS)
             user_content = user_content[-self.MAX_INPUT_CHARS :]
 
         try:
@@ -66,5 +66,5 @@ class RealtimeSummarizer:
             )
             return summary
         except Exception as e:
-            logger.warning("Summarization failed: %s", e)
+            logger.warning("[realtime] Summarization failed: %s", e)
             return ""
