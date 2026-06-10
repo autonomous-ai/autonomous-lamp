@@ -1008,11 +1008,7 @@ class VoiceService:
             if rt_delegated:
                 # Delegated — send voice agent's summary + STT transcript to Lamp
                 if rt_delegate_msg:
-                    lamp_msg: str = (
-                        f"[instruction]{rt_delegate_msg}\n[transcript] {final_msg}"
-                        if final_msg
-                        else rt_delegate_msg
-                    )
+                    lamp_msg: str = f"[voice-instruction] {rt_delegate_msg}\n[transcript] {final_msg}"
                 else:
                     lamp_msg = final_msg
 
@@ -1021,20 +1017,25 @@ class VoiceService:
                     logger.info("[realtime] Sended message to lamp: %r", lamp_msg)
                 else:
                     logger.info(
-                        "[realtime] Do not send message to lamp: lamp_msg is empty"
+                        "[realtime] Do not send delegated message to lamp: lamp_msg is empty"
                     )
             else:
                 # Realtime already spoke — send as "voice_handled" to skip dead-air filler.
                 # Include skill hint so OpenClaw reads input-branching and responds NO_REPLY.
-                self._lamp_sender.send(
-                    f"[skills: input-branching]\n[HANDLED] {final_msg}\n[REPLY] {rt_transcript}",
-                    event_type="voice_agent_handled",
-                    skip_echo=True,
-                )
-                logger.info(
-                    "[realtime] Sended message to lamp: %r",
-                    f"[skills: input-branching]\n[HANDLED] {final_msg}\n[REPLY] {rt_transcript}",
-                )
+                if final_msg or rt_transcript:
+                    self._lamp_sender.send(
+                        f"[skills: input-branching]\n[HANDLED] {final_msg}\n[REPLY] {rt_transcript}",
+                        event_type="voice_agent_handled",
+                        skip_echo=True,
+                    )
+                    logger.info(
+                        "[realtime] Sended message to lamp: %r",
+                        f"[skills: input-branching]\n[HANDLED] {final_msg}\n[REPLY] {rt_transcript}",
+                    )
+                else:
+                    logger.info(
+                        "[realtime] Do not send handled message to lamp: lamp_msg is empty"
+                    )
 
             # 2. Submit SER — uses the UNTRIMMED snapshot so laughter / sighs
             self._decorator.submit_speech_emotion_from_session(
