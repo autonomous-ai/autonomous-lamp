@@ -1014,23 +1014,22 @@ class VoiceService:
 
                 if lamp_msg:
                     self._lamp_sender.send(lamp_msg, event_type=event_type)
-                    logger.info("[realtime] Sended message to lamp: %r", lamp_msg)
+                    logger.info("[realtime] Sent delegated message to lamp: %r", lamp_msg)
                 else:
                     logger.info(
                         "[realtime] Do not send delegated message to lamp: lamp_msg is empty"
                     )
             else:
-                # Realtime already spoke — send as "voice_handled" to skip dead-air filler.
-                # Include skill hint so OpenClaw reads input-branching and responds NO_REPLY.
-                if final_msg or rt_transcript:
+                handled_text: str = combined
+                if handled_text or rt_transcript:
                     self._lamp_sender.send(
-                        f"[skills: input-branching]\n[HANDLED] {final_msg}\n[REPLY] {rt_transcript}",
+                        f"[skills: input-branching]\n[HANDLED] {handled_text}\n[REPLY] {rt_transcript}",
                         event_type="voice_agent_handled",
                         skip_echo=True,
                     )
                     logger.info(
-                        "[realtime] Sended message to lamp: %r",
-                        f"[skills: input-branching]\n[HANDLED] {final_msg}\n[REPLY] {rt_transcript}",
+                        "[realtime] Sent handled message to lamp: %r",
+                        f"[HANDLED] {handled_text} [REPLY] {rt_transcript[:80]}",
                     )
                 else:
                     logger.info(
