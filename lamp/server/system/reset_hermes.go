@@ -2,7 +2,9 @@ package system
 
 import (
 	"log"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -29,36 +31,55 @@ func waitForServiceStop(unit string, timeout time.Duration) bool {
 	}
 }
 
-// hermesWipeDirs are Hermes state dirs we recursively remove on factory reset.
-// Surgical wipe (per design): `~/.hermes/` root is preserved except for the
-// files in hermesWipeFiles + DB triples — `.env` and `config.yaml` stay so the
-// next boot has working defaults after `hermes setup --reset` regenerates them.
+// hermesRoot is the Hermes home dir on the Pi. All Hermes-side wipe paths
+// derive from this so the wipe stays scoped to the agent runtime.
+const hermesRoot = "/root/.hermes"
+
+// hermesWipeDirs are Hermes state subdirs we recursively remove on factory
+// reset. Top-level files inside hermesRoot are handled separately by the
+// directory sweep (see hermesKeepFiles) — anything NOT in this list and NOT in
+// hermesKeepFiles stays untouched (skills/, bin/, audio_cache/, pairing/, …).
 var hermesWipeDirs = []string{
-	"/root/.hermes/sessions",    // conversation session state
-	"/root/.hermes/memories",    // semantic memory store
-	"/root/.hermes/tasks",       // background task runs
-	"/root/.hermes/subagents",   // subagent history
-	"/root/.hermes/checkpoints", // run checkpoints
-	"/root/.hermes/logs",        // runtime logs
-	"/root/.hermes/.cache",      // cache dir
-	"/root/.hermes/cron",        // scheduled jobs
+	hermesRoot + "/sessions",                // conversation session state
+	hermesRoot + "/memories",                // semantic memory store
+	hermesRoot + "/tasks",                   // background task runs
+	hermesRoot + "/subagents",               // subagent history
+	hermesRoot + "/checkpoints",             // run checkpoints
+	hermesRoot + "/logs",                    // runtime logs
+	hermesRoot + "/.cache",                  // cache dir (dotted)
+	hermesRoot + "/cron",                    // scheduled jobs
+	hermesRoot + "/cache",                   // runtime cache (non-dotted, see tree)
+	hermesRoot + "/gateway",                 // gateway runtime state dir
+	hermesRoot + "/migration",               // migration history
+	hermesRoot + "/skills/openclaw-imports", // CDN-downloaded user-defined skills
+	hermesRoot + "/skills/audio_cache",      // audio cache
+	hermesRoot + "/skills/image_cache",      // image cache
 }
 
-// hermesWipeFiles are single files at `~/.hermes/` root we delete. Anything not
-// in this list (notably `.env`, `config.yaml`) is preserved.
-var hermesWipeFiles = []string{
-	"/root/.hermes/SOUL.md",   // agent personality
-	"/root/.hermes/auth.json", // auth state
+// hermesKeepFiles is the allow-list of TOP-LEVEL FILES (not dirs) under
+// hermesRoot that survive factory reset. The sweep removes every regular file
+// at hermesRoot whose name is NOT a key here.
+//
+//   - .env, config.yaml: reset in place by `hermes setup --reset` (Step 3)
+//   - auth.lock:         lock file — leave for daemon to manage on restart
+//   - SOUL.md:           kept on disk but overwritten to a blank template
+//     after the sweep (so the persona resets without orphaning the file).
+//
+// Anything else at top level (DB triples like state.db / state.db-shm /
+// state.db-wal, response_store.*, kanban.*, auth.json, gateway.pid,
+// gateway.lock, gateway_state.json, channel_directory.json,
+// config.yaml.bak.*, *_cache.json, image_cacheon, …) is swept out.
+var hermesKeepFiles = map[string]bool{
+	".env":        true,
+	"config.yaml": true,
+	"auth.lock":   true,
+	"SOUL.md":     true,
 }
 
-// hermesDBBases enumerates SQLite database basenames at `~/.hermes/`. For each
-// base, we remove `.db`, `.db-shm`, and `.db-wal` (SQLite WAL companion files
-// — leaving them behind would let SQLite resurrect partial state on next open).
-var hermesDBBases = []string{
-	"/root/.hermes/state",          // gateway state
-	"/root/.hermes/kanban",         // task board
-	"/root/.hermes/response_store", // response cache for previous_response_id chains
-}
+// hermesSoulTemplate is the blank-slate content written to SOUL.md after the
+// sweep. Mirrors the openclaw factoryreset pattern of "wipe persona but keep
+// a stub the agent can rebuild from".
+const hermesSoulTemplate = "# Hermes Agent Persona\n"
 
 // wipeHermesState runs the Hermes reset flow. Unlike openclaw, Hermes has no
 // single "reset everything" CLI. Daemon MUST die before we touch state files,
@@ -68,10 +89,11 @@ var hermesDBBases = []string{
 //  2. systemctl stop hermes-gateway + verify    (kill any systemd-supervised process)
 //  3. hermes setup --reset --non-interactive    (now-safe config.yaml/.env reset)
 //  4. systemctl disable hermes-gateway          (no auto-start; SetupAgent re-enables)
-//  5. surgical rm                               (dirs + files + DB triples)
+//  5. surgical rm                               (dirs + top-level file sweep + SOUL.md template)
 //
 // `~/.hermes/.env` and `~/.hermes/config.yaml` are NOT rm'd — Step 3 resets
-// them in place to defaults.
+// them in place to defaults. `~/.hermes/SOUL.md` is overwritten in Step 5 with
+// a blank template.
 func wipeHermesState() {
 	// Step 1: stop hermes gateway.
 	log.Printf("[factory-reset/hermes] step 1/5 — hermes gateway stop")
@@ -112,24 +134,44 @@ func wipeHermesState() {
 		log.Printf("[factory-reset/hermes] step 4/5 — hermes-gateway disabled")
 	}
 
-	// Step 5: surgical wipe. Three buckets — dirs (rm -rf), single files, and
-	// SQLite DB triples (.db + .db-shm + .db-wal).
-	log.Printf("[factory-reset/hermes] step 5/5 — wiping %d dirs + %d files + %d db triples",
-		len(hermesWipeDirs), len(hermesWipeFiles), len(hermesDBBases))
+	// Step 5: surgical wipe. Two buckets — enumerated subdirs (rm -rf) and a
+	// top-level file sweep keyed by hermesKeepFiles. SQLite DB triples
+	// (.db + .db-shm + .db-wal), config.yaml rotating backups, gateway runtime
+	// files, etc. are all caught by the sweep — no enumeration needed.
+	log.Printf("[factory-reset/hermes] step 5/5 — wiping %d dirs + top-level file sweep", len(hermesWipeDirs))
 
 	for _, d := range hermesWipeDirs {
 		wipePath("[factory-reset/hermes]", d)
 	}
 
-	for _, f := range hermesWipeFiles {
-		wipePath("[factory-reset/hermes]", f)
+	// Top-level file sweep: ReadDir(hermesRoot), delete every regular file
+	// whose name is NOT in hermesKeepFiles. Dirs at top level are untouched
+	// here — they're handled (or intentionally preserved) above.
+	entries, err := os.ReadDir(hermesRoot)
+	if err != nil {
+		log.Printf("[factory-reset/hermes] sweep: cannot read %s: %v (non-fatal)", hermesRoot, err)
+	} else {
+		swept := 0
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			if hermesKeepFiles[e.Name()] {
+				continue
+			}
+			wipePath("[factory-reset/hermes]", filepath.Join(hermesRoot, e.Name()))
+			swept++
+		}
+		log.Printf("[factory-reset/hermes] sweep: removed %d top-level files (keep-list: %d)", swept, len(hermesKeepFiles))
 	}
 
-	// SQLite leaves -shm (shared memory) and -wal (write-ahead log) sidecar
-	// files.
-	for _, base := range hermesDBBases {
-		for _, suffix := range []string{".db", ".db-shm", ".db-wal"} {
-			wipePath("[factory-reset/hermes]", base+suffix)
-		}
+	// SOUL.md: kept by sweep, but its previous content (user-customized
+	// persona) must not survive a factory reset. Overwrite with a blank
+	// template so the agent starts from "# Hermes Agent Persona" next boot.
+	soulPath := filepath.Join(hermesRoot, "SOUL.md")
+	if err := os.WriteFile(soulPath, []byte(hermesSoulTemplate), 0o644); err != nil {
+		log.Printf("[factory-reset/hermes] reset SOUL.md: %v (non-fatal)", err)
+	} else {
+		log.Printf("[factory-reset/hermes] reset SOUL.md to template")
 	}
 }
