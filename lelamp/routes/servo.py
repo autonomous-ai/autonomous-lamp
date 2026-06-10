@@ -203,6 +203,10 @@ def resume_servos():
         raise HTTPException(503, "Servo not available")
     state.animation_service._zero_mode = False
     state.animation_service._hold_mode = False
+    # Stop the event loop before raw bus moves to prevent bus contention
+    state.animation_service._running.clear()
+    if state.animation_service._event_thread and state.animation_service._event_thread.is_alive():
+        state.animation_service._event_thread.join(timeout=3.0)
     # Re-enable torque and reconfigure servos (release left torque disabled)
     try:
         state.animation_service._configure_servos_raw()
@@ -218,16 +222,13 @@ def resume_servos():
     state.animation_service._sync_state_from_hardware()
     # Normal interpolation duration (arm arrives from a controlled position)
     state.animation_service._resume_duration = state.animation_service.duration
-    if not state.animation_service._running.is_set():
-        state.animation_service._running.set()
-        state.animation_service.dispatch(SERVO_CMD_PLAY, state.animation_service.idle_recording)
-        state.animation_service._event_thread = threading.Thread(
-            target=state.animation_service._event_loop, daemon=True
-        )
-        state.animation_service._event_thread.start()
-        state.logger.info("Animation event loop restarted via /servo/resume")
-    else:
-        state.animation_service.dispatch(SERVO_CMD_PLAY, state.animation_service.idle_recording)
+    # Restart event loop
+    state.animation_service._running.set()
+    state.animation_service.dispatch(SERVO_CMD_PLAY, state.animation_service.idle_recording)
+    state.animation_service._event_thread = threading.Thread(
+        target=state.animation_service._event_loop, daemon=True
+    )
+    state.animation_service._event_thread.start()
     state.logger.info("Servo resumed from zero-hold mode")
     return {"status": "ok"}
 
@@ -339,6 +340,26 @@ def release_servos():
         state.animation_service.move_to_raw(rest_raw, duration=4.0)
     except Exception as e:
         state.logger.warning(f"Could not move to rest before release: {e}")
+    # Poll PRESENT_POSITION until all joints physically reach rest_raw before cutting torque.
+    # move_to_raw only writes GOAL_POSITION — under load the servo lags the command.
+    _PRESENT_REG = 56
+    _tol_raw = 23  # ~2 degrees (4095/360 * 2)
+    _bus = state.animation_service.robot.bus
+    _deadline = time.perf_counter() + 3.0
+    while time.perf_counter() < _deadline:
+        with state.animation_service.bus_lock:
+            actual = {}
+            for _name, _motor in _bus.motors.items():
+                _data, _result, _ = _bus.packet_handler.read2ByteTxRx(
+                    _bus.port_handler, _motor.id, _PRESENT_REG
+                )
+                if _result == 0:
+                    actual[_name] = _data
+        if all(abs(actual.get(k, 0) - v) <= _tol_raw for k, v in rest_raw.items()):
+            break
+        time.sleep(0.05)
+    else:
+        state.logger.warning("rest_raw not reached within 3s; releasing torque anyway")
     bus = state.animation_service.robot.bus
     errors = {}
     with state.animation_service.bus_lock:
