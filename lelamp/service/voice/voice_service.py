@@ -999,34 +999,42 @@ class VoiceService:
             final_text, event_type = self._decorator.resolve_wake_word_split(combined)
             user = UNKNOWN_USER_LABEL
 
-            if combined:
-                final_msg, se_user = self._decorator.identify_and_decorate(
-                    final_text, audio_buffer
-                )
-                user = se_user if se_user else UNKNOWN_USER_LABEL
-                lamp_msg: str = ""
+            final_msg, se_user = self._decorator.identify_and_decorate(
+                final_text, audio_buffer
+            )
+            user = se_user if se_user else UNKNOWN_USER_LABEL
+            lamp_msg: str = ""
 
-                if rt_delegated:
-                    # Delegated — send voice agent's summary + STT transcript to Lamp
-                    if rt_delegate_msg:
-                        lamp_msg: str = (
-                            f"[instruction]{rt_delegate_msg}\n[transcript] {final_msg}"
-                            if final_msg
-                            else rt_delegate_msg
-                        )
-                    else:
-                        lamp_msg = final_msg
-
-                    if lamp_msg:
-                        self._lamp_sender.send(lamp_msg, event_type=event_type)
-                else:
-                    # Realtime already spoke — send as "voice_handled" to skip dead-air filler.
-                    # Include skill hint so OpenClaw reads input-branching and responds NO_REPLY.
-                    self._lamp_sender.send(
-                        f"[skills: input-branching]\n[HANDLED] {final_msg}\n[REPLY] {rt_transcript}",
-                        event_type="voice_agent_handled",
-                        skip_echo=True,
+            if rt_delegated:
+                # Delegated — send voice agent's summary + STT transcript to Lamp
+                if rt_delegate_msg:
+                    lamp_msg: str = (
+                        f"[instruction]{rt_delegate_msg}\n[transcript] {final_msg}"
+                        if final_msg
+                        else rt_delegate_msg
                     )
+                else:
+                    lamp_msg = final_msg
+
+                if lamp_msg:
+                    self._lamp_sender.send(lamp_msg, event_type=event_type)
+                    logger.info("[realtime] Sended message to lamp: %r", lamp_msg)
+                else:
+                    logger.info(
+                        "[realtime] Do not send message to lamp: lamp_msg is empty"
+                    )
+            else:
+                # Realtime already spoke — send as "voice_handled" to skip dead-air filler.
+                # Include skill hint so OpenClaw reads input-branching and responds NO_REPLY.
+                self._lamp_sender.send(
+                    f"[skills: input-branching]\n[HANDLED] {final_msg}\n[REPLY] {rt_transcript}",
+                    event_type="voice_agent_handled",
+                    skip_echo=True,
+                )
+                logger.info(
+                    "[realtime] Sended message to lamp: %r",
+                    f"[skills: input-branching]\n[HANDLED] {final_msg}\n[REPLY] {rt_transcript}",
+                )
 
             # 2. Submit SER — uses the UNTRIMMED snapshot so laughter / sighs
             self._decorator.submit_speech_emotion_from_session(

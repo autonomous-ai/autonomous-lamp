@@ -151,7 +151,7 @@ class RealtimeContextManager:
                 new_entries.append(entry)
                 total_chars += len(entry)
             except Exception as e:
-                logger.warning("Failed to read memory %s: %s", md_file, e)
+                logger.warning("[realtime] Failed to read memory %s: %s", md_file, e)
         if not new_entries:
             return
 
@@ -165,12 +165,12 @@ class RealtimeContextManager:
                 pass
         to_summarize.extend(new_entries)
 
-        logger.info("Summarizing %d new lamp memory files...", len(new_files))
+        logger.info("[realtime] Summarizing %d new lamp memory files...", len(new_files))
         new_summary: str = self._summarizer.summarize(to_summarize)
         if new_summary:
             self._lamp_summary_path.parent.mkdir(parents=True, exist_ok=True)
             self._lamp_summary_path.write_text(new_summary + "\n", encoding="utf-8")
-            logger.info("Lamp memory summarization complete → lamp_summary.md")
+            logger.info("[realtime] Lamp memory summarization complete → lamp_summary.md")
 
     def summarize_realtime_memory(self) -> None:
         """Summarize entries in memory.jsonl into summary.md, keeping entries added during summarization.
@@ -207,7 +207,7 @@ class RealtimeContextManager:
                         pass
             to_summarize.extend(entries)
 
-            logger.info("Summarizing %d realtime memory entries...", len(entries))
+            logger.info("[realtime] Summarizing %d realtime memory entries...", len(entries))
             new_summary: str = self._summarizer.summarize(to_summarize)
             if new_summary:
                 with self._memory_lock:
@@ -220,7 +220,7 @@ class RealtimeContextManager:
                     self._realtime_memory_path.write_text(
                         "\n".join(remaining) + "\n" if remaining else "", encoding="utf-8"
                     )
-                logger.info("Realtime memory summarization complete → summary.md (kept %d new entries)", len(remaining))
+                logger.info("[realtime] Realtime memory summarization complete → summary.md (kept %d new entries)", len(remaining))
         finally:
             self._summarizing = False
 
@@ -243,7 +243,7 @@ class RealtimeContextManager:
                     f.write(line)
             self._trim_memory_if_needed()
         except Exception as e:
-            logger.warning("Failed to save realtime memory: %s", e)
+            logger.warning("[realtime] Failed to save realtime memory: %s", e)
 
     # --- Private loaders ---
 
@@ -267,7 +267,7 @@ class RealtimeContextManager:
             except FileNotFoundError:
                 continue
             except Exception as e:
-                logger.warning("Failed to read %s: %s", path, e)
+                logger.warning("[realtime] Failed to read %s: %s", path, e)
         return "\n\n".join(parts)
 
     def _load_skills_catalog(self) -> str:
@@ -293,7 +293,7 @@ class RealtimeContextManager:
                 if name:
                     rows.append((name, desc))
             except Exception as e:
-                logger.warning("Failed to parse %s: %s", skill_md, e)
+                logger.warning("[realtime] Failed to parse %s: %s", skill_md, e)
 
         if not rows:
             return ""
@@ -322,7 +322,7 @@ class RealtimeContextManager:
                 if summary:
                     entries.append(f"[Previous summary]\n{summary}")
             except Exception as e:
-                logger.warning("Failed to read lamp summary: %s", e)
+                logger.warning("[realtime] Failed to read lamp summary: %s", e)
 
         # Load memory files modified after the lamp summary
         memory_dir: Path = self._workspace / "memory"
@@ -350,7 +350,7 @@ class RealtimeContextManager:
                 entries.append(entry)
                 total_chars += len(entry)
             except Exception as e:
-                logger.warning("Failed to read memory %s: %s", md_file, e)
+                logger.warning("[realtime] Failed to read memory %s: %s", md_file, e)
         return entries
 
     def _load_realtime_memory_entries(self) -> list[str]:
@@ -368,7 +368,7 @@ class RealtimeContextManager:
                 if summary:
                     entries.append(f"[Previous summary]\n{summary}")
             except Exception as e:
-                logger.warning("Failed to read summary: %s", e)
+                logger.warning("[realtime] Failed to read summary: %s", e)
 
         # Load recent JSONL entries
         if not self._realtime_memory_path.exists():
@@ -381,7 +381,7 @@ class RealtimeContextManager:
                 .splitlines()
             )
         except Exception as e:
-            logger.warning("Failed to read realtime memory: %s", e)
+            logger.warning("[realtime] Failed to read realtime memory: %s", e)
             return entries
 
         # Load entries from the end until char budget is reached
@@ -438,11 +438,11 @@ class RealtimeContextManager:
 
             # Background summarization
             if needs_summarize:
-                logger.info("Memory.jsonl exceeds char limit — summarizing in background")
+                logger.info("[realtime] Memory.jsonl exceeds char limit — summarizing in background")
 
                 threading.Thread(
                     target=self.summarize_realtime_memory, daemon=True, name="rt-summarize",
                 ).start()
 
         except Exception as e:
-            logger.warning("Failed to trim realtime memory: %s", e)
+            logger.warning("[realtime] Failed to trim realtime memory: %s", e)
