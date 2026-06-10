@@ -115,6 +115,13 @@ class RealtimeOrchestrator:
             logger.info("Realtime orchestrator disabled (provider=%s)", provider)
             return
 
+        # Catch up on any unsummarized memory from previous session
+        try:
+            self._context.summarize_lamp_memory()
+            self._context.summarize_realtime_memory()
+        except Exception:
+            logger.exception("Failed to catch up on memory summarization")
+
         instructions: str = self._context.build_instructions()
         logger.info("Context manager built instructions (%d chars)", len(instructions))
 

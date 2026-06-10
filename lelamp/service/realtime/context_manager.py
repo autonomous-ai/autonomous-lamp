@@ -51,6 +51,7 @@ class RealtimeContextManager:
         self._raw_memory_path: Path = self._realtime_memory_path.with_name("memory_raw.jsonl")
         # Lock for concurrent access to memory files (background summarizer + add_turn + load)
         self._memory_lock: threading.Lock = threading.Lock()
+        self._summarizing: bool = False
 
     # --- Public API ---
 
@@ -138,11 +139,17 @@ class RealtimeContextManager:
             return
 
         new_entries: list[str] = []
+        total_chars: int = 0
         for md_file in new_files:
             try:
                 content: str = md_file.read_text(encoding="utf-8").strip()
-                if content:
-                    new_entries.append(f"## {md_file.stem}\n\n{content}")
+                if not content:
+                    continue
+                entry: str = f"## {md_file.stem}\n\n{content}"
+                if total_chars + len(entry) > self._lamp_memory_max_chars:
+                    break
+                new_entries.append(entry)
+                total_chars += len(entry)
             except Exception as e:
                 logger.warning("Failed to read memory %s: %s", md_file, e)
         if not new_entries:
@@ -166,41 +173,56 @@ class RealtimeContextManager:
             logger.info("Lamp memory summarization complete → lamp_summary.md")
 
     def summarize_realtime_memory(self) -> None:
-        """Summarize all unsummarized entries in memory.jsonl into summary.md and clear it.
+        """Summarize entries in memory.jsonl into summary.md, keeping entries added during summarization.
 
         Called on shutdown and by the trim background thread.
         """
         if not self._summarizer:
             return
         with self._memory_lock:
-            if not self._realtime_memory_path.exists():
+            if self._summarizing:
                 return
-            raw: str = self._realtime_memory_path.read_text(encoding="utf-8").strip()
-            if not raw:
-                return
-            lines: list[str] = raw.splitlines()
-            entries: list[str] = self._parse_jsonl_lines(lines)
-            if not entries:
-                return
-
-        to_summarize: list[str] = []
-        with self._memory_lock:
-            if self._summary_path.exists():
-                try:
-                    existing: str = self._summary_path.read_text(encoding="utf-8").strip()
-                    if existing:
-                        to_summarize.append(f"[Previous summary]\n{existing}")
-                except Exception:
-                    pass
-        to_summarize.extend(entries)
-
-        logger.info("Summarizing %d realtime memory entries...", len(entries))
-        new_summary: str = self._summarizer.summarize(to_summarize)
-        if new_summary:
+            self._summarizing = True
+        try:
             with self._memory_lock:
-                self._summary_path.write_text(new_summary + "\n", encoding="utf-8")
-                self._realtime_memory_path.write_text("", encoding="utf-8")
-            logger.info("Realtime memory summarization complete → summary.md")
+                if not self._realtime_memory_path.exists():
+                    return
+                raw: str = self._realtime_memory_path.read_text(encoding="utf-8").strip()
+                if not raw:
+                    return
+                lines: list[str] = raw.splitlines()
+                lines_read: int = len(lines)
+                entries: list[str] = self._parse_jsonl_lines(lines)
+                if not entries:
+                    return
+
+            to_summarize: list[str] = []
+            with self._memory_lock:
+                if self._summary_path.exists():
+                    try:
+                        existing: str = self._summary_path.read_text(encoding="utf-8").strip()
+                        if existing:
+                            to_summarize.append(f"[Previous summary]\n{existing}")
+                    except Exception:
+                        pass
+            to_summarize.extend(entries)
+
+            logger.info("Summarizing %d realtime memory entries...", len(entries))
+            new_summary: str = self._summarizer.summarize(to_summarize)
+            if new_summary:
+                with self._memory_lock:
+                    self._summary_path.write_text(new_summary + "\n", encoding="utf-8")
+                    # Only remove the lines we read — keep any new entries added during summarization
+                    current_lines: list[str] = (
+                        self._realtime_memory_path.read_text(encoding="utf-8").strip().splitlines()
+                    )
+                    remaining: list[str] = current_lines[lines_read:]
+                    self._realtime_memory_path.write_text(
+                        "\n".join(remaining) + "\n" if remaining else "", encoding="utf-8"
+                    )
+                logger.info("Realtime memory summarization complete → summary.md (kept %d new entries)", len(remaining))
+        finally:
+            self._summarizing = False
 
     def add_turn(self, user_text: str, agent_text: str) -> None:
         """Save a conversation turn to both working memory and raw archive."""
