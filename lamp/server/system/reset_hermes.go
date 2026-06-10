@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// stopVerifyTimeout caps how long we wait for hermes-server to actually leave the active state after `systemctl stop`.
+// stopVerifyTimeout caps how long we wait for hermes-gateway to actually leave the active state after `systemctl stop`.
 const stopVerifyTimeout = 5 * time.Second
 
 // isServiceActive returns true if `systemctl is-active <unit>` exits 0 (active). All other states (inactive, failed, unknown, activating) are treated as "not active" — safe to wipe.
@@ -61,56 +61,55 @@ var hermesDBBases = []string{
 }
 
 // wipeHermesState runs the Hermes reset flow. Unlike openclaw, Hermes has no
-// single "reset everything" CLI — flow is:
-//  1. hermes setup --reset    (resets config.yaml + scrubs API keys in .env)
-//  2. systemctl stop hermes-server  (graceful flush)
-//  3. hermes gateway stop     (separate gateway process)
-//  4. systemctl disable hermes-server  (no auto-start; SetupAgent re-enables)
-//  5. surgical rm: enumerated dirs + files + DB triples (.db + .db-shm + .db-wal)
+// single "reset everything" CLI. Daemon MUST die before we touch state files,
+// otherwise it holds SQLite write handles + re-creates wiped paths on its next
+// write tick. Order:
+//  1. hermes gateway stop                       (kill daemon first)
+//  2. systemctl stop hermes-gateway + verify    (kill any systemd-supervised process)
+//  3. hermes setup --reset --non-interactive    (now-safe config.yaml/.env reset)
+//  4. systemctl disable hermes-gateway          (no auto-start; SetupAgent re-enables)
+//  5. surgical rm                               (dirs + files + DB triples)
 //
-// `~/.hermes/.env` and `~/.hermes/config.yaml` are PRESERVED — `hermes setup
-// --reset` resets them in place to defaults, no need to wipe.
+// `~/.hermes/.env` and `~/.hermes/config.yaml` are NOT rm'd — Step 3 resets
+// them in place to defaults.
 func wipeHermesState() {
-	// Step 1: hermes setup --reset — resets config.yaml to defaults and scrubs
-	// API keys in .env. Run BEFORE stopping the service in case the CLI talks
-	// to the running daemon (mirrors `openclaw reset` which expects daemon up).
-	log.Printf("[factory-reset/hermes] step 1/5 — hermes setup --reset")
-	if out, err := exec.Command("hermes", "setup", "--reset").CombinedOutput(); err != nil {
-		log.Printf("[factory-reset/hermes] step 1/5 — hermes setup --reset error: %v — %s", err, strings.TrimSpace(string(out)))
+	// Step 1: stop hermes gateway.
+	log.Printf("[factory-reset/hermes] step 1/5 — hermes gateway stop")
+	if out, err := exec.Command("hermes", "gateway", "stop").CombinedOutput(); err != nil {
+		log.Printf("[factory-reset/hermes] step 1/5 — hermes gateway stop error: %v — %s", err, strings.TrimSpace(string(out)))
 	} else {
-		log.Printf("[factory-reset/hermes] step 1/5 — hermes setup --reset done: %s", strings.TrimSpace(string(out)))
+		log.Printf("[factory-reset/hermes] step 1/5 — hermes gateway stopped")
 	}
 
-	// Step 2: stop hermes-server systemd unit so the server flushes writes.
-	log.Printf("[factory-reset/hermes] step 2/5 — systemctl stop hermes-server")
-	if out, err := exec.Command("systemctl", "stop", "hermes-server").CombinedOutput(); err != nil {
-		log.Printf("[factory-reset/hermes] step 2/5 — stop hermes-server error: %v — %s", err, strings.TrimSpace(string(out)))
+	// Step 2: stop hermes-gateway systemd unit.
+	log.Printf("[factory-reset/hermes] step 2/5 — systemctl stop hermes-gateway")
+	if out, err := exec.Command("systemctl", "stop", "hermes-gateway").CombinedOutput(); err != nil {
+		log.Printf("[factory-reset/hermes] step 2/5 — stop hermes-gateway error: %v — %s", err, strings.TrimSpace(string(out)))
 	} else {
-		log.Printf("[factory-reset/hermes] step 2/5 — hermes-server stop returned ok")
+		log.Printf("[factory-reset/hermes] step 2/5 — hermes-gateway stop returned ok")
 	}
-	if waitForServiceStop("hermes-server", stopVerifyTimeout) {
-		log.Printf("[factory-reset/hermes] step 2/5 — hermes-server confirmed inactive")
+	if waitForServiceStop("hermes-gateway", stopVerifyTimeout) {
+		log.Printf("[factory-reset/hermes] step 2/5 — hermes-gateway confirmed inactive")
 	} else {
-		log.Printf("[factory-reset/hermes] step 2/5 — WARNING hermes-server still active after %s — SQLite wipe may race the running daemon",
+		log.Printf("[factory-reset/hermes] step 2/5 — WARNING hermes-gateway still active after %s — SQLite wipe may race the running daemon",
 			stopVerifyTimeout)
 	}
 
-	// Step 3: stop hermes gateway (separate process, controlled via hermes CLI
-	// not systemctl — per hermes deployment model).
-	log.Printf("[factory-reset/hermes] step 3/5 — hermes gateway stop")
-	if out, err := exec.Command("hermes", "gateway", "stop").CombinedOutput(); err != nil {
-		log.Printf("[factory-reset/hermes] step 3/5 — hermes gateway stop error: %v — %s", err, strings.TrimSpace(string(out)))
+	// Step 3: hermes setup --reset — resets config.yaml to defaults and scrubs
+	// API keys in .env.
+	log.Printf("[factory-reset/hermes] step 3/5 — hermes setup --reset --non-interactive")
+	if out, err := exec.Command("hermes", "setup", "--reset", "--non-interactive").CombinedOutput(); err != nil {
+		log.Printf("[factory-reset/hermes] step 3/5 — hermes setup --reset error: %v — %s", err, strings.TrimSpace(string(out)))
 	} else {
-		log.Printf("[factory-reset/hermes] step 3/5 — hermes gateway stopped")
+		log.Printf("[factory-reset/hermes] step 3/5 — hermes setup --reset done: %s", strings.TrimSpace(string(out)))
 	}
 
-	// Step 4: disable so the service does NOT auto-start on reboot. SetupAgent
-	// re-enables it after onboarding completes, same pattern as openclaw.
-	log.Printf("[factory-reset/hermes] step 4/5 — systemctl disable hermes-server")
-	if out, err := exec.Command("systemctl", "disable", "hermes-server").CombinedOutput(); err != nil {
-		log.Printf("[factory-reset/hermes] step 4/5 — disable hermes-server error: %v — %s", err, strings.TrimSpace(string(out)))
+	// Step 4: disable hermes-gateway so the service does NOT auto-start on reboot.
+	log.Printf("[factory-reset/hermes] step 4/5 — systemctl disable hermes-gateway")
+	if out, err := exec.Command("systemctl", "disable", "hermes-gateway").CombinedOutput(); err != nil {
+		log.Printf("[factory-reset/hermes] step 4/5 — disable hermes-gateway error: %v — %s", err, strings.TrimSpace(string(out)))
 	} else {
-		log.Printf("[factory-reset/hermes] step 4/5 — hermes-server disabled")
+		log.Printf("[factory-reset/hermes] step 4/5 — hermes-gateway disabled")
 	}
 
 	// Step 5: surgical wipe. Three buckets — dirs (rm -rf), single files, and
@@ -127,8 +126,7 @@ func wipeHermesState() {
 	}
 
 	// SQLite leaves -shm (shared memory) and -wal (write-ahead log) sidecar
-	// files. Removing only the .db while leaving -wal lets SQLite reconstruct
-	// state on next open, so wipe all three per database.
+	// files.
 	for _, base := range hermesDBBases {
 		for _, suffix := range []string{".db", ".db-shm", ".db-wal"} {
 			wipePath("[factory-reset/hermes]", base+suffix)
