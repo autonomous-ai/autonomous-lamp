@@ -332,6 +332,7 @@ REALTIME_PROVIDER: str = os.environ.get("LELAMP_REALTIME_PROVIDER", "gemini")  #
 # For Gemini: "off" disables automatic activity detection; any other value enables it.
 # For OpenAI: maps to turn_detection type in session config.
 REALTIME_TURN_DETECTION: str = os.environ.get("LELAMP_REALTIME_TURN_DETECTION", "off")
+REALTIME_CONNECT_MAX_RETRIES: int = int(os.environ.get("LELAMP_REALTIME_CONNECT_MAX_RETRIES", "3"))
 
 # --- Realtime: Gemini Live ---
 REALTIME_GEMINI_API_KEY: str = (
