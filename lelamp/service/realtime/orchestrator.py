@@ -47,6 +47,7 @@ DELEGATE_TOOL_DESCRIPTION: str = (
 )
 
 DELEGATE_TOOL: dict[str, Any] = {
+    "type": "function",
     "name": DELEGATE_TOOL_NAME,
     "description": DELEGATE_TOOL_DESCRIPTION,
     "parameters": {
@@ -74,14 +75,16 @@ class RealtimeOrchestrator:
 
     Automatically registers the delegate_to_main tool so the model
     can signal that the user's request should be handled by the main
-    flow (Lamp → OpenClaw).
+    flow (device → OpenClaw).
     """
 
     def __init__(
         self,
         extra_tools: list[dict[str, Any]] | None = None,
+        max_retries: int = config.REALTIME_CONNECT_MAX_RETRIES,
     ) -> None:
         self._tools: list[dict[str, Any]] = [DELEGATE_TOOL] + (extra_tools or [])
+        self._max_retries: int = max_retries
         self._agent: VoiceAgentBase | None = None
         summarizer: RealtimeSummarizer | None = None
         if config.REALTIME_SUMMARIZER_ENABLED:
@@ -92,9 +95,10 @@ class RealtimeOrchestrator:
                     config.REALTIME_SUMMARIZER_MODEL,
                 )
             except Exception as e:
-                logger.warning("[realtime] Failed to create summarizer: %s", e)
+                logger.warning("Failed to create summarizer: %s", e)
         self._context: RealtimeContextManager = RealtimeContextManager(
             language=_load_language() or "English",
+            provider=config.REALTIME_PROVIDER,
             summarizer=summarizer,
         )
 
@@ -113,18 +117,11 @@ class RealtimeOrchestrator:
         """Create the agent based on config and connect."""
         provider: str = config.REALTIME_PROVIDER.strip().lower()
         if provider in ("none", "off", "disabled", ""):
-            logger.info("[realtime] Realtime orchestrator disabled (provider=%s)", provider)
+            logger.info("Realtime orchestrator disabled (provider=%s)", provider)
             return
 
-        # Catch up on any unsummarized memory from previous session
-        try:
-            self._context.summarize_lamp_memory()
-            self._context.summarize_realtime_memory()
-        except Exception:
-            logger.exception("[realtime] Failed to catch up on memory summarization")
-
         instructions: str = self._context.build_instructions()
-        logger.info("[realtime] Context manager built instructions (%d chars)", len(instructions))
+        logger.info("Context manager built instructions (%d chars)", len(instructions))
 
         if provider == "gemini":
             from lelamp.service.realtime.voice_agent.gemini_live import GeminiLiveAgent
@@ -145,32 +142,34 @@ class RealtimeOrchestrator:
             )
 
         else:
-            logger.warning("[realtime] Unknown realtime provider: %s — disabled", provider)
+            logger.warning("Unknown realtime provider: %s — disabled", provider)
             return
 
-        try:
-            self._agent.connect()
-            logger.info("[realtime] Realtime orchestrator started (provider=%s)", provider)
-        except Exception:
-            logger.exception("[realtime] Failed to connect realtime agent")
-            self._agent = None
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                self._agent.connect()
+                logger.info("Realtime orchestrator started (provider=%s)", provider)
+                return
+            except Exception:
+                logger.exception(
+                    "Failed to connect realtime agent (attempt %d/%d)",
+                    attempt, self._max_retries,
+                )
+                if attempt < self._max_retries:
+                    import time
+                    time.sleep(2)
+        logger.error("Realtime agent failed to connect after %d attempts", self._max_retries)
+        self._agent = None
 
     def stop(self) -> None:
-        """Disconnect the agent and summarize unsummarized memory."""
-        # Summarize remaining memory before shutdown
-        try:
-            self._context.summarize_lamp_memory()
-            self._context.summarize_realtime_memory()
-        except Exception:
-            logger.exception("[realtime] Failed to summarize memory on shutdown")
-
+        """Disconnect the agent."""
         if self._agent is not None:
             try:
                 self._agent.disconnect()
             except Exception:
-                logger.exception("[realtime] Failed to disconnect realtime agent")
+                logger.exception("Failed to disconnect realtime agent")
             self._agent = None
-        logger.info("[realtime] Realtime orchestrator stopped")
+        logger.info("Realtime orchestrator stopped")
 
     def append_audio(self, frame: npt.NDArray[np.float32]) -> None:
         """Queue a single audio frame to the model (non-blocking)."""
