@@ -1,3 +1,9 @@
+> [!IMPORTANT]
+
+> This repository has moved. Active development continues at [autonomous-os](https://github.com/autonomous-ai/autonomous-os).
+
+> Please update your bookmarks, links, and Git remote URLs. This repository is retained for historical reference only.
+
 # Autonomous Lamp
 
 https://github.com/user-attachments/assets/2e6eea7d-312e-47dd-94cf-0914dedeccc4
