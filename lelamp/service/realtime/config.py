@@ -17,7 +17,7 @@ from lelamp.service.realtime.enums import (
 
 
 def _load_language() -> str | None:
-    """Load language from Lamp's config.json (stt_language field)."""
+    """Load language from device config.json (stt_language field)."""
     from lelamp.config import _lamp_cfg_get
 
     lang: str = _lamp_cfg_get("stt_language", "").strip()
@@ -25,7 +25,7 @@ def _load_language() -> str | None:
 
 
 def _parse_turn_detection(value: str) -> OpenAITurnDetectionType | None:
-    """Parse LELAMP_REALTIME_TURN_DETECTION into an OpenAITurnDetectionType or None (off)."""
+    """Parse HAL_REALTIME_TURN_DETECTION into an OpenAITurnDetectionType or None (off)."""
     v = value.strip().lower()
     if v in ("off", "none", ""):
         return None
@@ -51,8 +51,6 @@ class OpenAIConfig(BaseModel):
     )
     truncation_type: OpenAITruncationType = OpenAITruncationType.RETENTION_RATIO
     truncation_retention_ratio: float = 0.5
-    max_retries: int = 3
-    reconnect_delay_s: float = 2.0
 
 
 class GeminiConfig(BaseModel):
@@ -73,9 +71,3 @@ class GeminiConfig(BaseModel):
         "",
     )
     context_window_compression: bool = True
-    max_retries: int = 3
-    reconnect_delay_s: float = 2.0
-    send_timeout_s: float = 10.0
-    recv_timeout_s: float = 300.0
-    queue_poll_s: float = 1.0
-    join_timeout_s: float = 5.0

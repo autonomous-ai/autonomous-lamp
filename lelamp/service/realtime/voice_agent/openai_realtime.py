@@ -3,6 +3,7 @@
 import base64
 import logging
 import queue
+import threading
 import time
 from typing import Any, override
 
@@ -52,9 +53,11 @@ class OpenAIRealtimeAgent(VoiceAgentBase):
         )
         self._connection: RealtimeConnection | None = None
         self._speech_stopped_at: float | None = None
-        self._reconnect_delay_s: float = config.reconnect_delay_s
-        self._max_retries: int = config.max_retries
-        self._last_reconnect_at: float = 0.0
+        self._reconnect_delay_s: float = 2.0
+        # Signals that the model is idle (no active response). Set by default,
+        # cleared when response.create() is called, set again on response.done.
+        self._response_done: threading.Event = threading.Event()
+        self._response_done.set()
 
     @property
     @override
@@ -113,11 +116,11 @@ class OpenAIRealtimeAgent(VoiceAgentBase):
         session_config["truncation"] = truncation_cfg
 
         self._connection.session.update(session=session_config)
-        logger.info("[realtime] OpenAI Realtime session open (voice=%s)", self._config.voice)
+        logger.info("OpenAI Realtime session open (voice=%s)", self._config.voice)
 
     def _sync_disconnect(self) -> None:
         if self._connection is not None:
-            logger.info("[realtime] Disconnecting from OpenAI Realtime API")
+            logger.info("Disconnecting from OpenAI Realtime API")
             self._connection.close()
             self._connection = None
 
@@ -160,12 +163,21 @@ class OpenAIRealtimeAgent(VoiceAgentBase):
                     "output": input.output,
                 }
             )
-            self._connection.response.create()
+            self._safe_response_create()
 
     def _sync_commit(self) -> None:
         if self._connection is None:
             return
         self._connection.input_audio_buffer.commit()
+        self._safe_response_create()
+
+    def _safe_response_create(self) -> None:
+        """Wait for any active response to finish, then create a new one."""
+        if self._connection is None:
+            return
+        if not self._response_done.wait(timeout=10.0):
+            logger.warning("Timed out waiting for active response to finish — forcing new response")
+        self._response_done.clear()
         self._connection.response.create()
 
     def _sync_receive_turn(self) -> None:
@@ -188,7 +200,7 @@ class OpenAIRealtimeAgent(VoiceAgentBase):
                         latency_ms: float = (
                             time.perf_counter() - self._speech_stopped_at
                         ) * 1000
-                        logger.info("[realtime] Response latency: %.0fms", latency_ms)
+                        logger.info("Response latency: %.0fms", latency_ms)
                         self._speech_stopped_at = None
                     self._recv_queue.put(
                         OutputEvent(
@@ -218,12 +230,13 @@ class OpenAIRealtimeAgent(VoiceAgentBase):
                     )
 
                 case "response.done":
-                    logger.debug("[realtime] Response complete")
+                    logger.debug("Response complete")
+                    self._response_done.set()
                     self._recv_queue.put(TurnDoneEvent())
                     return
 
                 case "error":
-                    logger.error("[realtime] Realtime API error: %s", event.error)
+                    logger.error("Realtime API error: %s", event.error)
                     raise OpenAIRealtimeError(f"Realtime API error: {event.error}")
 
                 case _:
@@ -231,25 +244,16 @@ class OpenAIRealtimeAgent(VoiceAgentBase):
 
     # --- Reconnect ---
 
-    def _ensure_connected(self) -> None:
-        """Reconnect if not connected. Throttled to at most once per reconnect_delay_s."""
-        if self._connected.is_set():
-            return
-        now: float = time.perf_counter()
-        if now - self._last_reconnect_at < self._reconnect_delay_s:
-            return
-        self._last_reconnect_at = now
-        self._reconnect()
-
     def _reconnect(self) -> None:
         self._connected.clear()
+        self._response_done.set()  # unblock any waiting commit
         try:
-            logger.info("[realtime] Reconnecting...")
+            logger.info("Reconnecting...")
             self._sync_disconnect()
             self._sync_connect()
             self._connected.set()
         except Exception as e:
-            logger.warning("[realtime] Reconnect failed: %s — will retry after delay", e)
+            logger.warning("Reconnect failed: %s — will retry after delay", e)
             time.sleep(self._reconnect_delay_s)
 
     # --- VoiceAgentBase implementation ---
@@ -270,20 +274,14 @@ class OpenAIRealtimeAgent(VoiceAgentBase):
             except queue.Empty:
                 continue
 
-            for attempt in range(self._max_retries):
-                self._ensure_connected()
-                if not self._connected.is_set():
-                    continue
-                try:
-                    if isinstance(event, AudioCommitEvent):
-                        self._sync_commit()
-                    elif isinstance(event, InputEvent) and event.input is not None:
-                        self._sync_send_input(event.input)
-                    break  # Success
-                except Exception as e:
-                    logger.warning("[realtime] Send failed (attempt %d/%d): %s", attempt + 1, self._max_retries, e)
-                    self._connected.clear()
-                    self._connection = None
+            try:
+                if isinstance(event, AudioCommitEvent):
+                    self._sync_commit()
+                elif isinstance(event, InputEvent) and event.input is not None:
+                    self._sync_send_input(event.input)
+            except Exception as e:
+                logger.warning("Send failed: %s — reconnecting", e)
+                self._reconnect()
 
     @override
     def _recv_loop(self) -> None:
@@ -291,19 +289,11 @@ class OpenAIRealtimeAgent(VoiceAgentBase):
             if not self._connected.is_set():
                 self._connected.wait(timeout=1)
                 continue
-
-            for attempt in range(self._max_retries):
-                self._ensure_connected()
-                if not self._connected.is_set():
-                    continue
-                try:
-                    self._sync_receive_turn()
-                    break  # Success
-                except OpenAIRealtimeError as e:
-                    logger.warning("[realtime] Recv failed (attempt %d/%d): %s", attempt + 1, self._max_retries, e)
-                    self._connected.clear()
-                    self._connection = None
-                except Exception as e:
-                    logger.exception("[realtime] Unexpected recv error (attempt %d/%d): %s", attempt + 1, self._max_retries, e)
-                    self._connected.clear()
-                    self._connection = None
+            try:
+                self._sync_receive_turn()
+            except OpenAIRealtimeError as e:
+                logger.warning("Recv failed: %s — reconnecting", e)
+                self._reconnect()
+            except Exception as e:
+                logger.exception("Unexpected error in recv loop: %s", e)
+                self._reconnect()

@@ -41,6 +41,12 @@ logger = logging.getLogger(__name__)
 
 
 class GeminiLiveAgent(VoiceAgentBase):
+    DEFAULT_RECONNECT_DELAY_S: float = 2.0
+    DEFAULT_SEND_TIMEOUT_S: float = 10.0
+    DEFAULT_RECV_TIMEOUT_S: float = 300.0
+    DEFAULT_QUEUE_POLL_S: float = 1.0
+    DEFAULT_JOIN_TIMEOUT_S: float = 5.0
+
     def __init__(
         self,
         config: GeminiConfig,
@@ -61,13 +67,15 @@ class GeminiLiveAgent(VoiceAgentBase):
         self._first_audio_received: bool = False
         self._vad_disabled: bool = not config.vad_enabled
         self._activity_started: bool = False
-        self._reconnect_delay_s: float = config.reconnect_delay_s
-        self._last_reconnect_at: float = 0.0
-        self._max_retries: int = config.max_retries
-        self._send_timeout_s: float = config.send_timeout_s
-        self._recv_timeout_s: float = config.recv_timeout_s
-        self._queue_poll_s: float = config.queue_poll_s
-        self._join_timeout_s: float = config.join_timeout_s
+        self._reconnect_delay_s: float = self.DEFAULT_RECONNECT_DELAY_S
+        self._send_timeout_s: float = self.DEFAULT_SEND_TIMEOUT_S
+        self._recv_timeout_s: float = self.DEFAULT_RECV_TIMEOUT_S
+        self._queue_poll_s: float = self.DEFAULT_QUEUE_POLL_S
+        self._join_timeout_s: float = self.DEFAULT_JOIN_TIMEOUT_S
+        # Signals that the model is idle (no active turn). Set by default,
+        # cleared when activityEnd is sent, set again on turn_complete.
+        self._turn_done: threading.Event = threading.Event()
+        self._turn_done.set()
 
     @property
     @override
@@ -145,11 +153,11 @@ class GeminiLiveAgent(VoiceAgentBase):
                 config=self._build_config(),
             )
         )
-        logger.info("[realtime] Gemini Live session open (voice=%s)", self._config.voice)
+        logger.info("Gemini Live session open (voice=%s)", self._config.voice)
 
     async def _async_disconnect(self) -> None:
         if self._exit_stack is not None:
-            logger.info("[realtime] Disconnecting from Gemini Live API")
+            logger.info("Disconnecting from Gemini Live API")
             await self._exit_stack.aclose()
             self._exit_stack = None
             self._session = None
@@ -164,7 +172,7 @@ class GeminiLiveAgent(VoiceAgentBase):
                     activity_start=types.ActivityStart()
                 )
                 self._activity_started = True
-                logger.debug("[realtime] Sent activityStart (manual VAD)")
+                logger.debug("Sent activityStart (manual VAD)")
 
             self._speech_ended_at = time.perf_counter()
             pcm_bytes: bytes = float32_to_pcm16_bytes(input.audio)
@@ -205,7 +213,8 @@ class GeminiLiveAgent(VoiceAgentBase):
         if self._vad_disabled and self._activity_started:
             await self._session.send_realtime_input(activity_end=types.ActivityEnd())
             self._activity_started = False
-            logger.debug("[realtime] Sent activityEnd (manual VAD)")
+            self._turn_done.clear()
+            logger.debug("Sent activityEnd (manual VAD)")
 
     async def _async_receive_turn(self) -> None:
         """Read one full turn from the session, put outputs on _recv_queue."""
@@ -226,7 +235,7 @@ class GeminiLiveAgent(VoiceAgentBase):
                                     latency_ms: float = (
                                         time.perf_counter() - self._speech_ended_at
                                     ) * 1000
-                                    logger.info("[realtime] Response latency: %.0fms", latency_ms)
+                                    logger.info("Response latency: %.0fms", latency_ms)
                                     self._speech_ended_at = None
                             self._recv_queue.put(
                                 OutputEvent(
@@ -250,18 +259,20 @@ class GeminiLiveAgent(VoiceAgentBase):
                     )
 
                 if content.interrupted:
-                    logger.debug("[realtime] Response interrupted")
+                    logger.debug("Response interrupted")
                     self._first_audio_received = False
+                    self._turn_done.set()
 
                 if content.turn_complete:
-                    logger.debug("[realtime] Turn complete")
+                    logger.debug("Turn complete")
                     self._first_audio_received = False
+                    self._turn_done.set()
                     self._recv_queue.put(TurnDoneEvent())
                     return
 
             elif message.tool_call and message.tool_call.function_calls:
                 for fc in message.tool_call.function_calls:
-                    logger.debug("[realtime] Function call: %s (call_id=%s)", fc.name, fc.id)
+                    logger.debug("Function call: %s (call_id=%s)", fc.name, fc.id)
                     self._recv_queue.put(
                         OutputEvent(
                             output=FunctionCallOutput(
@@ -285,29 +296,20 @@ class GeminiLiveAgent(VoiceAgentBase):
 
     # --- Reconnect ---
 
-    def _ensure_connected(self) -> None:
-        """Reconnect if not connected. Throttled to at most once per reconnect_delay_s."""
-        if self._connected.is_set():
-            return
-        now: float = time.perf_counter()
-        if now - self._last_reconnect_at < self._reconnect_delay_s:
-            return
-        self._last_reconnect_at = now
-        self._reconnect()
-
     def _reconnect(self) -> None:
         self._connected.clear()
         self._activity_started = False
+        self._turn_done.set()  # unblock any waiting commit
         if self._loop is None:
-            logger.error("[realtime] Cannot reconnect — event loop is None")
+            logger.error("Cannot reconnect — event loop is None")
             return
         try:
-            logger.info("[realtime] Reconnecting...")
+            logger.info("Reconnecting...")
             self._submit_and_wait(self._async_disconnect())
             self._submit_and_wait(self._async_connect())
             self._connected.set()
         except Exception as e:
-            logger.warning("[realtime] Reconnect failed: %s — will retry after delay", e)
+            logger.warning("Reconnect failed: %s — will retry after delay", e)
             time.sleep(self._reconnect_delay_s)
 
     # --- VoiceAgentBase implementation ---
@@ -358,27 +360,24 @@ class GeminiLiveAgent(VoiceAgentBase):
             except queue.Empty:
                 continue
 
-            for attempt in range(self._max_retries):
-                self._ensure_connected()
-                if not self._connected.is_set():
-                    continue
-                try:
-                    if isinstance(event, AudioCommitEvent):
-                        self._submit_and_wait(
-                            self._async_commit(), timeout=self._send_timeout_s
-                        )
-                    elif isinstance(event, InputEvent):
-                        self._submit_and_wait(
-                            self._async_send_input(event.input),
-                            timeout=self._send_timeout_s,
-                        )
-                    break  # Success
-                except (ConnectionClosed, genai_errors.APIError) as e:
-                    logger.warning("[realtime] Send failed (attempt %d/%d): %s", attempt + 1, self._max_retries, e)
-                    self._reconnect()
-                except Exception as e:
-                    logger.warning("[realtime] Send error (attempt %d/%d): %s", attempt + 1, self._max_retries, e)
-                    self._reconnect()
+            try:
+                if isinstance(event, AudioCommitEvent):
+                    if not self._turn_done.wait(timeout=10.0):
+                        logger.warning("Timed out waiting for turn to finish — forcing commit")
+                    self._submit_and_wait(
+                        self._async_commit(), timeout=self._send_timeout_s
+                    )
+                elif isinstance(event, InputEvent):
+                    self._submit_and_wait(
+                        self._async_send_input(event.input),
+                        timeout=self._send_timeout_s,
+                    )
+            except (ConnectionClosed, genai_errors.APIError) as e:
+                logger.warning("Send failed: %s — reconnecting", e)
+                self._reconnect()
+            except Exception as e:
+                logger.warning("Send error: %s — reconnecting", e)
+                self._reconnect()
 
     @override
     def _recv_loop(self) -> None:
@@ -388,31 +387,13 @@ class GeminiLiveAgent(VoiceAgentBase):
             if not self._connected.is_set():
                 _ = self._connected.wait(timeout=self._queue_poll_s)
                 continue
-
-            for attempt in range(self._max_retries):
-                self._ensure_connected()
-                if not self._connected.is_set():
-                    continue
-                try:
-                    self._submit_and_wait(
-                        self._async_receive_turn(), timeout=self._recv_timeout_s
-                    )
-                    break  # Success — turn received
-                except ConnectionClosed as e:
-                    code: int | None = getattr(getattr(e, "rcvd", None), "code", None)
-                    if code == 1000:
-                        logger.info("[realtime] Session closed normally (idle) — will reconnect on next audio")
-                        self._connected.clear()
-                        self._session = None
-                        break  # Don't retry on idle close
-                    logger.warning("[realtime] Recv failed (attempt %d/%d): %s", attempt + 1, self._max_retries, e)
-                    self._connected.clear()
-                    self._session = None
-                except genai_errors.APIError as e:
-                    logger.warning("[realtime] Recv API error (attempt %d/%d): %s", attempt + 1, self._max_retries, e)
-                    self._connected.clear()
-                    self._session = None
-                except Exception as e:
-                    logger.exception("[realtime] Unexpected recv error (attempt %d/%d): %s", attempt + 1, self._max_retries, e)
-                    self._connected.clear()
-                    self._session = None
+            try:
+                self._submit_and_wait(
+                    self._async_receive_turn(), timeout=self._recv_timeout_s
+                )
+            except (ConnectionClosed, genai_errors.APIError) as e:
+                logger.warning("Recv failed: %s — reconnecting", e)
+                self._reconnect()
+            except Exception as e:
+                logger.exception("Unexpected error in recv loop: %s", e)
+                self._reconnect()
